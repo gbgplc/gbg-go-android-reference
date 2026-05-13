@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!--
+    The Compose layer drives the actual palette via MaterialTheme; this XML
+    theme only exists so the Activity has a valid window background while
+    Compose is bootstrapping. The android:* parent is a built-in framework
+    theme so we don't need the material view-system library.
+  -->
+  <style name="Theme.GBGGoReference" parent="android:Theme.Material.Light.NoActionBar">
+    <item name="android:statusBarColor">@android:color/transparent</item>
+    <item name="android:windowBackground">@android:color/white</item>
+  </style>
+</resources>

@@ -1,0 +1,33 @@
+# Gradle
+.gradle/
+build/
+*/build/
+local.properties
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+captures/
+.cxx/
+
+# Keystores
+*.jks
+*.keystore
+
+# Generated files
+gen/
+out/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE caches
+.vscode/
+
+# Logs
+*.log
+
+# Companion server (Node.js)
+server/node_modules/
+server/.env
