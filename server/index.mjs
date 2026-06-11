@@ -53,10 +53,16 @@ const AUTH_OPTS = SERVER_URL
   ? { serverURL: SERVER_URL.replace(/\/v2\/captain\/?$/, "") }
   : { serverIdx: SERVER_IDX };
 
-if (!SERVER_URL && (SERVER_IDX < 0 || SERVER_IDX >= REGIONS.length)) {
+if (
+  !SERVER_URL &&
+  (!Number.isInteger(SERVER_IDX) ||
+    SERVER_IDX < 0 ||
+    SERVER_IDX >= REGIONS.length)
+) {
   console.warn(
-    `GO_SERVER_IDX=${process.env.GO_SERVER_IDX} is out of range ` +
-      `(expected 0–${REGIONS.length - 1}); SDK calls will fail until corrected.`
+    `GO_SERVER_IDX=${process.env.GO_SERVER_IDX} is not a valid index ` +
+      `(expected an integer 0–${REGIONS.length - 1}); SDK calls will fail ` +
+      `until corrected.`
   );
 }
 
