@@ -190,20 +190,25 @@ fun JourneyScreen(
               WebView.setWebContentsDebuggingEnabled(true)
             }
 
-            // BridgeWebViewConfigurator replaces the WebView's
-            // WebViewClient and WebChromeClient (the API-26+ getters
-            // aren't available at minSdk 24, so it can't compose with
-            // them). We pass our own WebViewClient — a subclass of the
-            // SDK's BootstrapInjectingWebViewClient that keeps the bridge
-            // bootstrap (via super.onPageStarted) and adds load/HTTP/SSL
-            // error logging. The WebChromeClient (console logging) must be
-            // set AFTER configure() / attach(), since configure() installs
-            // its own and attach() shouldn't be raced.
-            BridgeWebViewConfigurator.configure(
+            // attach() configures the WebView internally (it calls
+            // BridgeWebViewConfigurator.configure with the host's bootstrap
+            // and the client passed here), so we hand our custom WebViewClient
+            // straight to attach() rather than to a standalone configure()
+            // call — a configure() before attach() would just be re-run and
+            // clobbered by attach()'s own configure(client = null).
+            //
+            // DiagnosticWebViewClient subclasses the SDK's
+            // BootstrapInjectingWebViewClient: it keeps the bridge bootstrap
+            // (via super.onPageStarted) and adds load/HTTP/SSL error logging.
+            //
+            // The WebChromeClient (console logging) is NOT installed by
+            // attach(), and must be set AFTER it — configure() installs a
+            // plain WebChromeClient, so setting ours earlier would be
+            // overwritten.
+            controller.host.attach(
               webView = this,
               client = DiagnosticWebViewClient(DEFAULT_BOOTSTRAP_SCRIPT),
             )
-            controller.host.attach(this)
             webChromeClient = DiagnosticWebChromeClient()
             loadUrl(journeyUrl)
           }

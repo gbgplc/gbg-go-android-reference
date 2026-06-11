@@ -70,7 +70,12 @@ internal class CameraCaptureHandler(
   fun onPickerResult(context: Context, uri: Uri?) {
     val responder = activeResponder ?: return
     if (uri == null) {
-      cancelled(responder, "User cancelled image selection")
+      // The user opened the system photo picker and backed out without
+      // choosing an image. That dismisses the picker only — it must NOT
+      // cancel the whole capture request, or the journey would receive a
+      // spurious CANCELLED and the capture surface (which still offers the
+      // camera and placeholder paths) would be torn down. Leave the request
+      // active and return to the capture surface.
       return
     }
     val bitmap = try {
