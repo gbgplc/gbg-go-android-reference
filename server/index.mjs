@@ -39,10 +39,31 @@ const app = express();
 app.use(express.json());
 
 // ---------------------------------------------------------------------------
-// Authentication — generate an access token on startup
+// Authentication
 // ---------------------------------------------------------------------------
+//
+// GBG Go issues short-lived access tokens (the `expiresIn` below is in
+// seconds — typically only a few minutes) and the password grant returns NO
+// refresh token. So "renewal" is simply re-running the same password auth
+// with the stored credentials.
+//
+// We authenticate lazily: `getValidToken()` re-authenticates on demand when
+// the cached token is missing or within REFRESH_SKEW_MS of expiry, so a
+// long-running server keeps working instead of silently 401-ing until it's
+// restarted. A startup call still runs as a fail-fast smoke check.
+
+// Re-authenticate this many ms before the token's stated expiry, so an
+// in-flight request never races the boundary and lands on a just-expired
+// token.
+const REFRESH_SKEW_MS = 30_000;
+// Fallback lifetime if the auth response omits `expiresIn` (optional in the
+// SDK schema). Deliberately short so we re-auth often rather than trust a
+// stale token.
+const FALLBACK_TTL_MS = 60_000;
 
 let customerAccessToken = null;
+let tokenExpiresAt = 0; // epoch ms; 0 = no valid token cached
+let authInFlight = null; // shared promise so concurrent callers auth once
 
 async function authenticate() {
   const go = new Go();
@@ -59,7 +80,37 @@ async function authenticate() {
     }
   );
   customerAccessToken = auth.accessToken;
-  console.log(`Authenticated with GBG Go (${REGIONS[SERVER_IDX]} region)`);
+  const ttlMs =
+    typeof auth.expiresIn === "number" ? auth.expiresIn * 1000 : FALLBACK_TTL_MS;
+  tokenExpiresAt = Date.now() + ttlMs;
+  if (typeof auth.expiresIn !== "number") {
+    console.warn(
+      `Auth response omitted expiresIn; assuming ${FALLBACK_TTL_MS / 1000}s lifetime`
+    );
+  }
+  console.log(
+    `Authenticated with GBG Go (${REGIONS[SERVER_IDX]} region), ` +
+      `token valid for ${Math.round(ttlMs / 1000)}s`
+  );
+}
+
+/**
+ * Return a non-expired customer access token, re-authenticating if the cached
+ * one is missing or about to expire. Concurrent callers share a single
+ * in-flight auth so a burst of requests doesn't trigger a burst of logins.
+ * Throws if authentication fails (e.g. bad credentials).
+ */
+async function getValidToken() {
+  if (customerAccessToken && Date.now() < tokenExpiresAt - REFRESH_SKEW_MS) {
+    return customerAccessToken;
+  }
+  if (!authInFlight) {
+    authInFlight = authenticate().finally(() => {
+      authInFlight = null;
+    });
+  }
+  await authInFlight;
+  return customerAccessToken;
 }
 
 // ---------------------------------------------------------------------------
@@ -99,14 +150,18 @@ app.get("/health", (_req, res) => {
  */
 app.post("/api/journey/start", async (req, res) => {
   try {
-    if (!customerAccessToken) {
+    let token;
+    try {
+      token = await getValidToken();
+    } catch (authErr) {
       return res.status(503).json({
         error: "Server not authenticated. Check your .env credentials.",
+        message: authErr.message,
       });
     }
 
     const serverOpts = SERVER_URL ? { serverURL: SERVER_URL } : {};
-    const client = new Go({ customerAccess: customerAccessToken });
+    const client = new Go({ customerAccess: token });
 
     // Step 1: Start a journey session
     const journey = await client.journeys.start(
@@ -242,14 +297,18 @@ app.post("/api/journey/start", async (req, res) => {
  */
 app.get("/api/journey/:instanceId/state", async (req, res) => {
   try {
-    if (!customerAccessToken) {
+    let token;
+    try {
+      token = await getValidToken();
+    } catch (authErr) {
       return res.status(503).json({
         error: "Server not authenticated. Check your .env credentials.",
+        message: authErr.message,
       });
     }
 
     const serverOpts = SERVER_URL ? { serverURL: SERVER_URL } : {};
-    const client = new Go({ customerAccess: customerAccessToken });
+    const client = new Go({ customerAccess: token });
 
     const state = await client.journeys.getState(
       { instanceId: req.params.instanceId },
@@ -280,14 +339,18 @@ app.get("/api/journey/:instanceId/state", async (req, res) => {
 // ---------------------------------------------------------------------------
 
 async function start() {
+  // Fail-fast smoke check. Authentication is lazy (see getValidToken), so a
+  // transient failure here isn't fatal — routes will retry on demand — but a
+  // misconfiguration (bad credentials) is worth surfacing loudly at startup.
   try {
     await authenticate();
   } catch (err) {
-    console.error("Authentication failed:", err.message);
+    console.error("Startup authentication failed:", err.message);
     console.error(
-      "The server will start, but /api/journey/start will return 503."
+      "The server will still start and retry auth on the first request, " +
+        "but if this is a credentials problem those requests will return 503."
     );
-    console.error("Check your .env credentials and try restarting.");
+    console.error("Check your .env credentials.");
   }
 
   app.listen(PORT, () => {
