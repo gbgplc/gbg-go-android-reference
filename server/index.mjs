@@ -35,6 +35,31 @@ const SERVER_IDX = parseInt(process.env.GO_SERVER_IDX || "0", 10);
 const REGIONS = ["EU", "US", "AU"];
 const SERVER_URL = process.env.GO_SERVER_URL || undefined;
 
+// Server selection, shared by auth and every Captain call so they can never
+// target different environments.
+//
+//   - No GO_SERVER_URL  → prod: select the regional server by index. The SDK
+//     maps SERVER_IDX to the correct per-operation URL (the token endpoint and
+//     the Captain endpoints have separate server lists), so this is the single
+//     region knob for prod.
+//   - GO_SERVER_URL set → a custom/nonprod host (e.g. the demo fabric env).
+//     Used verbatim for Captain calls. The token endpoint lives at the host
+//     ROOT, not under /v2/captain, so we strip that suffix to derive the auth
+//     base — mirroring the two separate server lists the SDK ships.
+const CAPTAIN_OPTS = SERVER_URL
+  ? { serverURL: SERVER_URL }
+  : { serverIdx: SERVER_IDX };
+const AUTH_OPTS = SERVER_URL
+  ? { serverURL: SERVER_URL.replace(/\/v2\/captain\/?$/, "") }
+  : { serverIdx: SERVER_IDX };
+
+if (!SERVER_URL && (SERVER_IDX < 0 || SERVER_IDX >= REGIONS.length)) {
+  console.warn(
+    `GO_SERVER_IDX=${process.env.GO_SERVER_IDX} is out of range ` +
+      `(expected 0–${REGIONS.length - 1}); SDK calls will fail until corrected.`
+  );
+}
+
 const app = express();
 app.use(express.json());
 
@@ -75,10 +100,14 @@ async function authenticate() {
       password: process.env.GO_PASSWORD,
       grantType: "password",
     },
-    {
-      serverURL: "https://gbggo4-demo-au.nonprod.fabric.gbgplatforms.com",
-    }
+    AUTH_OPTS
   );
+  // `accessToken` is optional in the SDK's response schema. A 200 with no
+  // token would otherwise be cached as `undefined` (then re-auth on every
+  // request and surface downstream as an opaque 500) — fail loudly instead.
+  if (!auth.accessToken) {
+    throw new Error("Authentication succeeded but no accessToken was returned");
+  }
   customerAccessToken = auth.accessToken;
   const ttlMs =
     typeof auth.expiresIn === "number" ? auth.expiresIn * 1000 : FALLBACK_TTL_MS;
@@ -88,8 +117,13 @@ async function authenticate() {
       `Auth response omitted expiresIn; assuming ${FALLBACK_TTL_MS / 1000}s lifetime`
     );
   }
+  // Report the actual target, not just the index — when GO_SERVER_URL is set
+  // it (not the region index) is what's really in effect.
+  const target = SERVER_URL
+    ? SERVER_URL
+    : `${REGIONS[SERVER_IDX] ?? "?"} region (serverIdx ${SERVER_IDX})`;
   console.log(
-    `Authenticated with GBG Go (${REGIONS[SERVER_IDX]} region), ` +
+    `Authenticated with GBG Go [${target}], ` +
       `token valid for ${Math.round(ttlMs / 1000)}s`
   );
 }
@@ -160,7 +194,7 @@ app.post("/api/journey/start", async (req, res) => {
       });
     }
 
-    const serverOpts = SERVER_URL ? { serverURL: SERVER_URL } : {};
+    const serverOpts = CAPTAIN_OPTS;
     const client = new Go({ customerAccess: token });
 
     // Step 1: Start a journey session
@@ -307,7 +341,7 @@ app.get("/api/journey/:instanceId/state", async (req, res) => {
       });
     }
 
-    const serverOpts = SERVER_URL ? { serverURL: SERVER_URL } : {};
+    const serverOpts = CAPTAIN_OPTS;
     const client = new Go({ customerAccess: token });
 
     const state = await client.journeys.getState(
