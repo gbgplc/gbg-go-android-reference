@@ -1,23 +1,23 @@
 // ResultScreen.kt
 //
 // Shown after a journey reaches a terminal state. JourneyScreen detects the
-// terminal `journey.completed` / `journey.failed` / `journey.abandoned` event
-// on the bridge (sent by the end-user web app via the lifecycle emitter) and
-// navigates here, popping itself off the back stack.
+// terminal `journey.completed` / `journey.failed` / `journey.abandoned`
+// event on the bridge and navigates here, popping itself off the back
+// stack.
 //
 // Two integration teaching points live here:
 //
-//   1. The bridge event is the immediate "journey ended" signal — that's how
-//      we got to this screen at all.
+//   1. The bridge event is the immediate "journey ended" signal — that's
+//      how we got to this screen at all.
 //
-//   2. The bridge event tells you *that* the journey ended; the Captain
+//   2. The bridge event tells you *that* the journey ended; the GBG Go
 //      `journeys.getState` API tells you *what* the outcome was. The
-//      "Fetch outcome from Captain" button below demonstrates the second
-//      step by calling a companion-server endpoint that proxies through to
-//      the SDK call. In production the canonical pattern is webhook-driven
-//      — your backend receives a Captain webhook on completion and pushes
-//      the outcome to your app over your own channel — but the polled
-//      shape below is simpler for a reference build.
+//      "Fetch outcome" button below demonstrates the second step by
+//      calling a companion-server endpoint that proxies through to the
+//      SDK call. In production the recommended pattern is webhook-driven
+//      — your backend receives a webhook on completion and pushes the
+//      outcome to your app over your own channel — but the polled shape
+//      below is simpler for a reference build.
 
 package com.gbg.go.reference.ui.result
 
@@ -109,7 +109,7 @@ fun ResultScreen(
         text = "The web journey signalled this terminal state via a bridge " +
           "event (journey.${status.wireValue}). The bridge event is the " +
           "immediate signal that the journey ended; the button below fetches " +
-          "the authoritative outcome from the Captain API via the companion " +
+          "the authoritative outcome from the GBG Go API via the companion " +
           "server. In production, webhook-driven backends are usually " +
           "preferable to native polling.",
         style = MaterialTheme.typography.bodySmall,
@@ -159,7 +159,7 @@ private fun FetchOutcomeSection(
         Text(
           text = when (state) {
             is FetchState.Loaded -> "Fetch again"
-            else -> "Fetch outcome from Captain"
+            else -> "Fetch outcome"
           },
         )
       }

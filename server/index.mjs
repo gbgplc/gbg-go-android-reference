@@ -82,6 +82,150 @@ app.get("/health", (_req, res) => {
 });
 
 /**
+ * POST /api/journey/start — create a new journey session
+ *
+ * Request body (all fields optional):
+ *   {
+ *     "resourceId": "a4c68509c24789888eb466@latest"
+ *   }
+ *
+ * Response:
+ *   {
+ *     "instanceId": "PiIuACmx8Q8R7qPnAkLAqBAT",
+ *     "journeyUrl": "https://...",
+ *     "connectToken": "s4FUx8Ny...",
+ *     "expiresIn": 120
+ *   }
+ */
+app.post("/api/journey/start", async (req, res) => {
+  try {
+    if (!customerAccessToken) {
+      return res.status(503).json({
+        error: "Server not authenticated. Check your .env credentials.",
+      });
+    }
+
+    const serverOpts = SERVER_URL ? { serverURL: SERVER_URL } : {};
+    const client = new Go({ customerAccess: customerAccessToken });
+
+    // Step 1: Start a journey session
+    const journey = await client.journeys.start(
+      {
+        resourceId: req.body.resourceId ?? process.env.GO_RESOURCE_ID,
+        context: {
+          subject: {},
+          config: { delivery: "page" },
+        },
+      },
+      serverOpts
+    );
+    console.log("Journey started:", journey.instanceId);
+    // Step 2: Register a mobile device against the journey
+    const device = await client.devices.add(
+      {
+        instanceId: journey.instanceId,
+        scope: ["mobile"],
+      },
+      serverOpts
+    );
+    console.log("Device registered:", device);
+    // Step 3: Connect the device to obtain an end-user token
+    const connection = await client.devices.connect(
+      { deviceConnect: device.connectToken },
+      {
+        deviceInfo: {
+          deviceName: "Android Reference App",
+          deviceId: "android-reference-device",
+          deviceType: "mobile",
+        },
+        connectToken: device.connectToken,
+      },
+      serverOpts
+    );
+    console.log("Device connected:", connection);
+    // Step 4: Fetch the interaction to validate the session
+    const unauthenticatedClient = new Go();
+    let interactions;
+    try {
+      interactions = await unauthenticatedClient.interactions.fetch(
+        { interactionAccess: String(connection.endUserToken) },
+        { instanceId: journey.instanceId },
+        serverOpts
+      );
+    } catch (err) {
+      console.error(err);
+      console.error("Failed to fetch interaction:", err.message);
+      interactions = { error: err.message };
+    }
+
+    // `interactions.fetch` returns a discriminated union — either a populated
+    // ResponseBody (`instanceId` / `interactionId` / `journey` / `interaction`)
+    // or a FetchInteractionError (`status` / `code` / `message`). It's not an
+    // array, so don't expect `.length`. Log a shape-aware summary instead.
+    if ("interactionId" in interactions) {
+      console.log(
+        "Interaction fetched:",
+        interactions.interactionId,
+        "for journey",
+        journey.instanceId
+      );
+    } else {
+      console.log(
+        "Interaction fetch returned error variant for journey",
+        journey.instanceId,
+        "—",
+        interactions
+      );
+    }
+
+    // Return the journey details to the Android app
+    const result = {
+      instanceId: journey.instanceId,
+      journeyUrl: journey.instanceUrl,
+      connectToken: device.connectToken,
+      expiresIn: device.expiresIn,
+    };
+    console.log("Journey started:", result);
+    res.json(result);
+  } catch (err) {
+    // The SDK's typed errors carry diagnostic state the bare `err.message`
+    // doesn't surface. ResponseValidationError in particular has a `.body`
+    // (raw response that failed zod validation) and `.cause` (the underlying
+    // zod issue). Print both so the operator can see exactly which field /
+    // value the SDK rejected — without this the symptom is a flat "response
+    // validation failed" with nothing to chase.
+    const cause = err?.cause?.message;
+    const rawBody = err?.body;
+    const httpStatus = err?.statusCode ?? err?.rawResponse?.status;
+    console.error(
+      "Journey start failed:",
+      err?.constructor?.name ?? "Error",
+      "—",
+      err.message
+    );
+    if (httpStatus) {
+      console.error("  HTTP status:", httpStatus);
+    }
+    if (cause) {
+      console.error("  Cause:", cause);
+    }
+    if (rawBody) {
+      try {
+        const parsed = JSON.parse(rawBody);
+        console.error("  Response body:", JSON.stringify(parsed, null, 2));
+      } catch {
+        console.error("  Response body (raw):", rawBody);
+      }
+    }
+    res.status(500).json({
+      error: "Failed to start journey",
+      message: err.message,
+      detail: cause ?? undefined,
+    });
+  }
+});
+
+/**
  * GET /api/journey/:instanceId/state — fetch the authoritative outcome
  *
  * The Android app calls this from its Result screen after the web journey
@@ -131,150 +275,6 @@ app.get("/api/journey/:instanceId/state", async (req, res) => {
   }
 });
 
-/**
- * POST /api/journey/start — create a new journey session
- *
- * Request body (all fields optional):
- *   {
- *     "resourceId": "a4c68509c24789888eb466@latest"
- *   }
- *
- * Response:
- *   {
- *     "instanceId": "PiIuACmx8Q8R7qPnAkLAqBAT",
- *     "journeyUrl": "https://...",
- *     "connectToken": "s4FUx8Ny...",
- *     "expiresIn": 120
- *   }
- */
-app.post("/api/journey/start", async (req, res) => {
-  try {
-    if (!customerAccessToken) {
-      return res.status(503).json({
-        error: "Server not authenticated. Check your .env credentials.",
-      });
-    }
-
-    const serverOpts = SERVER_URL ? { serverURL: SERVER_URL } : {};
-    const client = new Go({ customerAccess: customerAccessToken });
-
-    // Step 1: Start a journey session
-    const journey = await client.journeys.start(
-      {
-        resourceId: req.body.resourceId ?? process.env.GO_RESOURCE_ID,
-        context: {
-          subject: {},
-          config: { delivery: "page" },
-        },
-      },
-      serverOpts
-    );
-    console.log("Journey started:", journey.instanceId);
-    // Step 2: Register a mobile device against the journey
-    const device = await client.devices.add(
-      {
-        instanceId: journey.instanceId,
-        scope: ["mobile"],
-      },
-      serverOpts
-    );
-    console.log("Device registered:", device.deviceId);
-    // Step 3: Connect the device to obtain an end-user token
-    const connection = await client.devices.connect(
-      { deviceConnect: device.connectToken },
-      {
-        deviceInfo: {
-          deviceName: "Android Reference App",
-          deviceId: "android-reference-device",
-          deviceType: "mobile",
-        },
-        connectToken: device.connectToken,
-      },
-      serverOpts
-    );
-
-    // Step 4: Fetch the interaction to validate the session
-    const unauthenticatedClient = new Go();
-    let interactions;
-    try {
-      interactions = await unauthenticatedClient.interactions.fetch(
-        { interactionAccess: String(connection.endUserToken) },
-        { instanceId: journey.instanceId },
-        serverOpts
-      );
-    } catch (err) {
-      console.error(err);
-      console.error("Failed to fetch interaction:", err.message);
-      interactions = { error: err.message };
-    }
-
-    // `interactions.fetch` returns a discriminated union — either a populated
-    // ResponseBody (`instanceId` / `interactionId` / `journey` / `interaction`)
-    // or a FetchInteractionError (`status` / `code` / `message`). It's not an
-    // array, so don't expect `.length`. Log a shape-aware summary instead.
-    if ("interactionId" in interactions) {
-      console.log(
-        "Interaction fetched:",
-        interactions.interactionId,
-        "for journey",
-        journey.instanceId
-      );
-    } else {
-      console.log(
-        "Interaction fetch returned error variant for journey",
-        journey.instanceId,
-        "—",
-        interactions
-      );
-    }
-
-    // Return the journey details to the Android app
-    const result = {
-      instanceId: journey.instanceId,
-      journeyUrl: journey.instanceUrl,
-      connectToken: device.connectToken,
-      expiresIn: device.expiresIn,
-    };
-    console.log("Journey started:", result.instanceId);
-    res.json(result);
-  } catch (err) {
-    // The SDK's typed errors carry diagnostic state the bare `err.message`
-    // doesn't surface. ResponseValidationError in particular has a `.body`
-    // (raw response that failed zod validation) and `.cause` (the underlying
-    // zod issue). Print both so the operator can see exactly which field /
-    // value the SDK rejected — without this the symptom is a flat "response
-    // validation failed" with nothing to chase.
-    const cause = err?.cause?.message;
-    const rawBody = err?.body;
-    const httpStatus = err?.statusCode ?? err?.rawResponse?.status;
-    console.error(
-      "Journey start failed:",
-      err?.constructor?.name ?? "Error",
-      "—",
-      err.message
-    );
-    if (httpStatus) {
-      console.error("  HTTP status:", httpStatus);
-    }
-    if (cause) {
-      console.error("  Cause:", cause);
-    }
-    if (rawBody) {
-      try {
-        const parsed = JSON.parse(rawBody);
-        console.error("  Response body:", JSON.stringify(parsed, null, 2));
-      } catch {
-        console.error("  Response body (raw):", rawBody);
-      }
-    }
-    res.status(500).json({
-      error: "Failed to start journey",
-      message: err.message,
-      detail: cause ?? undefined,
-    });
-  }
-});
-
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
@@ -292,8 +292,8 @@ async function start() {
 
   app.listen(PORT, () => {
     console.log(`Server listening on http://localhost:${PORT}`);
-    console.log(`  GET  /                              — status`);
-    console.log(`  GET  /health                        — health check`);
+    console.log(`  GET  /                    — status`);
+    console.log(`  GET  /health              — health check`);
     console.log(`  POST /api/journey/start             — create journey session`);
     console.log(`  GET  /api/journey/:instanceId/state — fetch journey outcome`);
   });

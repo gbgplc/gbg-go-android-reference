@@ -3,14 +3,13 @@
 // Calls the companion server to create a journey session. The server handles
 // authentication with GBG Go and returns a journey URL for the app to load.
 //
-// This is the Android side of the flow documented in the Journey URL guide:
+// This is the Android side of the flow:
 //
 //   Android App  ──▸  Your Backend  ──▸  GBG Go Core SDK
 //                ◂──                ◂──
 //
-// In production, "your backend" is your own server. Here we use the companion
-// server included in the iOS reference repository (gbg-go-ios-reference/server)
-// — both reference apps share it.
+// In production, "your backend" is your own server. Here we use the
+// companion server under `server/` in this repository.
 
 package com.gbg.go.reference.ui.journey
 
@@ -54,9 +53,9 @@ object JourneyService {
   /**
    * Fetches the authoritative journey outcome from the companion server,
    * which proxies to GBG Go's `journeys.getState`. Returned as a pretty-
-   * printed JSON string so the Result screen can display it verbatim — the
-   * response shape is large and customer-specific, so we deliberately don't
-   * model it as a typed Kotlin class here.
+   * printed JSON string so the Result screen can display it verbatim —
+   * the response shape varies by journey configuration, so we
+   * deliberately don't model it as a typed Kotlin class here.
    */
   suspend fun fetchState(serverUrl: String, instanceId: String): String =
     withContext(Dispatchers.IO) {
@@ -155,7 +154,7 @@ object JourneyService {
    * Build a user-facing message for a failed connect. If the URL targets a
    * loopback host (`localhost` / `127.0.0.1` / `::1`), append the canonical
    * Android-emulator workaround — from inside the emulator the loopback
-   * address points at the emulator itself, not the developer's Mac, so a
+   * address points at the emulator itself, not the host machine, so a
    * server running on the host needs the `10.0.2.2` alias instead.
    */
   private fun buildConnectionFailureMessage(endpoint: String, error: IOException): String {
@@ -164,10 +163,10 @@ object JourneyService {
     val isLoopback = host == "localhost" || host == "127.0.0.1" || host == "::1"
     if (!isLoopback) return base
     return base + "\n\nFrom inside the Android emulator, `localhost` / `127.0.0.1` " +
-      "routes to the emulator itself — not your Mac. To reach a companion " +
-      "server running on the host, change the Server URL to " +
+      "routes to the emulator itself — not the host machine. To reach a " +
+      "companion server running on the host, change the Server URL to " +
       "`http://10.0.2.2:3000` (the emulator's loopback alias for the host), " +
-      "or run `adb reverse tcp:3000 tcp:3000` from your Mac to forward the " +
+      "or run `adb reverse tcp:3000 tcp:3000` from the host to forward the " +
       "port and keep using 127.0.0.1."
   }
 

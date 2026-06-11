@@ -11,23 +11,21 @@
 //   5. Present native UI when a capture request arrives, return the result
 //      back to the journey via BridgeResponder.respond(...)
 //
-// The iOS reference mirrors this with `host.documentCapture` / `host.selfieCapture`
-// typed slots; those are deferred on Android (see PARITY.md), so the same
-// behaviour is achieved here with plain `BridgeCapabilityHandler`s registered
-// against `camera.document.capture` and `camera.selfie.capture` actions —
-// the wire-level action ids the iOS typed slots map to.
+// Capture requests are handled by registering `BridgeCapabilityHandler`s
+// against the wire-level action ids `camera.document.capture` and
+// `camera.selfie.capture`.
 //
 // Lifecycle:
 //   - BridgeHost is held in a `remember { }` tied to the JourneyScreen route.
 //   - DisposableEffect calls `host.detach()` on screen exit so the JS bridge
 //     interface and the WebView↔host edge are torn down cleanly.
-//   - The BridgeHostDelegate is held strongly by the `remember`d controller —
-//     PARITY.md notes the SDK stores the delegate weakly to mirror iOS's
-//     `weak var`, so the host caller MUST keep its own strong reference.
+//   - The BridgeHostDelegate is held strongly by the `remember`d controller.
+//     The SDK stores `BridgeHost.delegate` as a `WeakReference`, so the
+//     host caller MUST keep its own strong reference or callbacks will
+//     silently stop firing after the next GC.
 
 package com.gbg.go.reference.ui.journey
 
-import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -36,24 +34,21 @@ import android.util.Log
 import android.view.ViewGroup
 import android.webkit.WebView
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -68,7 +63,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import com.gbg.go.reference.ui.capture.SelfieStubScreen
+import com.gbg.go.reference.ui.capture.CaptureMode
+import com.gbg.go.reference.ui.capture.CaptureStubScreen
 import com.gbg.gbgbridge.core.BridgeCapabilityInfo
 import com.gbg.gbgbridge.core.BridgeConfiguration
 import com.gbg.gbgbridge.core.BridgeHost
@@ -84,6 +80,15 @@ import java.io.ByteArrayOutputStream
 private const val TAG = "JourneyScreen"
 private const val HOST_VERSION = "1.0.0"
 
+// Mirrors BridgeWebViewConfigurator.DEFAULT_BOOTSTRAP_SCRIPT, which is
+// `internal` to the SDK and so not visible here. We need the literal because
+// installing our own WebViewClient (for error logging) means we own the
+// bootstrap string passed to BootstrapInjectingWebViewClient's constructor.
+// Keep this in sync with the SDK default if the SDK changes it.
+private const val DEFAULT_BOOTSTRAP_SCRIPT: String =
+  "window.GBGBridge = window.GBGBridge || {}; " +
+    "window.GBGBridge.receive = window.GBGBridge.receive || function(){};"
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun JourneyScreen(
@@ -97,10 +102,7 @@ fun JourneyScreen(
   // `remember` keeps it across recompositions but releases on navigation
   // away — DisposableEffect below detaches the WebView edge first.
   val controller = remember(journeyUrl) {
-    BridgeController(hostVersion = HOST_VERSION).also {
-      it.cameraAvailable = context.packageManager
-        .hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)
-    }
+    BridgeController(hostVersion = HOST_VERSION)
   }
 
   // Drive recomposition when the host raises an error. lastError is mutated
@@ -108,25 +110,23 @@ fun JourneyScreen(
   // the delegate's onError + onMessage hooks, which run after every
   // SDK-internal write.
   var hostErrorBanner by remember { mutableStateOf<String?>(null) }
-  var documentSourceDialog by remember { mutableStateOf(false) }
-  var selfieStub by remember { mutableStateOf(false) }
 
-  // Activity result launchers — wired to the controller's handler state so
-  // the result lands on whichever handler is currently active.
-  val takeDocumentPicture = rememberLauncherForActivityResult(
-    ActivityResultContracts.TakePicturePreview(),
-  ) { bitmap ->
-    controller.documentHandler.onCameraResult(bitmap)
-  }
+  // Single-flight: only one capture handler can be active at a time
+  // (mirrors the BUSY guard inside CameraCaptureHandler). The handler's
+  // onActivate/onDeactivate callbacks below flip this between modes.
+  var activeCapture by remember { mutableStateOf<CaptureMode?>(null) }
 
+  // Modern system photo picker. PickVisualMedia replaces the legacy
+  // GetContent chooser with a privacy-friendlier surface and pre-filtered
+  // image-only results.
   val pickDocumentImage = rememberLauncherForActivityResult(
-    ActivityResultContracts.GetContent(),
+    ActivityResultContracts.PickVisualMedia(),
   ) { uri ->
     controller.documentHandler.onPickerResult(context, uri)
   }
 
   val pickSelfieImage = rememberLauncherForActivityResult(
-    ActivityResultContracts.GetContent(),
+    ActivityResultContracts.PickVisualMedia(),
   ) { uri ->
     controller.selfieHandler.onPickerResult(context, uri)
   }
@@ -136,10 +136,14 @@ fun JourneyScreen(
   // down by the route change, so guard against re-entry with a one-shot flag.
   var terminalFired by remember { mutableStateOf(false) }
   LaunchedEffect(controller) {
-    controller.documentHandler.onActivate = { documentSourceDialog = true }
-    controller.documentHandler.onDeactivate = { documentSourceDialog = false }
-    controller.selfieHandler.onActivate = { selfieStub = true }
-    controller.selfieHandler.onDeactivate = { selfieStub = false }
+    controller.documentHandler.onActivate = { activeCapture = CaptureMode.Document }
+    controller.documentHandler.onDeactivate = {
+      if (activeCapture == CaptureMode.Document) activeCapture = null
+    }
+    controller.selfieHandler.onActivate = { activeCapture = CaptureMode.Selfie }
+    controller.selfieHandler.onDeactivate = {
+      if (activeCapture == CaptureMode.Selfie) activeCapture = null
+    }
     controller.delegate.onErrorBanner = { hostErrorBanner = it }
     controller.delegate.onTerminalEvent = { status, instanceId, interactionId ->
       if (!terminalFired) {
@@ -176,11 +180,31 @@ fun JourneyScreen(
               ViewGroup.LayoutParams.MATCH_PARENT,
               ViewGroup.LayoutParams.MATCH_PARENT,
             )
-            // BridgeWebViewConfigurator clobbers WebViewClient /
-            // WebChromeClient (PARITY.md "configurator clobber"), so any
-            // custom client must be set AFTER configure() / attach().
-            BridgeWebViewConfigurator.configure(this)
+
+            // On debuggable builds, expose this WebView to chrome://inspect
+            // so a blank/broken journey can be inspected with full DevTools.
+            // Gated on FLAG_DEBUGGABLE so release APKs never opt in.
+            val debuggable = (ctx.applicationInfo.flags and
+              android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+            if (debuggable) {
+              WebView.setWebContentsDebuggingEnabled(true)
+            }
+
+            // BridgeWebViewConfigurator replaces the WebView's
+            // WebViewClient and WebChromeClient (the API-26+ getters
+            // aren't available at minSdk 24, so it can't compose with
+            // them). We pass our own WebViewClient — a subclass of the
+            // SDK's BootstrapInjectingWebViewClient that keeps the bridge
+            // bootstrap (via super.onPageStarted) and adds load/HTTP/SSL
+            // error logging. The WebChromeClient (console logging) must be
+            // set AFTER configure() / attach(), since configure() installs
+            // its own and attach() shouldn't be raced.
+            BridgeWebViewConfigurator.configure(
+              webView = this,
+              client = DiagnosticWebViewClient(DEFAULT_BOOTSTRAP_SCRIPT),
+            )
             controller.host.attach(this)
+            webChromeClient = DiagnosticWebChromeClient()
             loadUrl(journeyUrl)
           }
         },
@@ -213,35 +237,27 @@ fun JourneyScreen(
     }
   }
 
-  if (documentSourceDialog) {
-    DocumentSourceDialog(
-      cameraAvailable = controller.cameraAvailable,
-      onCamera = {
-        documentSourceDialog = false
-        takeDocumentPicture.launch(null)
-      },
-      onPhotoLibrary = {
-        documentSourceDialog = false
-        pickDocumentImage.launch("image/*")
-      },
-      onCancel = {
-        documentSourceDialog = false
-        controller.documentHandler.cancelActive("User dismissed source picker")
-      },
-    )
-  }
-
-  if (selfieStub) {
-    SelfieStubScreen(
-      onUseStubImage = {
-        controller.selfieHandler.completeWithStubImage()
-      },
+  activeCapture?.let { mode ->
+    val activeHandler = when (mode) {
+      CaptureMode.Document -> controller.documentHandler
+      CaptureMode.Selfie -> controller.selfieHandler
+    }
+    val activePicker = when (mode) {
+      CaptureMode.Document -> pickDocumentImage
+      CaptureMode.Selfie -> pickSelfieImage
+    }
+    CaptureStubScreen(
+      mode = mode,
+      onCapture = { bitmap -> activeHandler.onCameraResult(bitmap) },
       onPickFromLibrary = {
-        pickSelfieImage.launch("image/*")
+        activePicker.launch(
+          PickVisualMediaRequest(
+            ActivityResultContracts.PickVisualMedia.ImageOnly,
+          ),
+        )
       },
-      onCancel = {
-        controller.selfieHandler.cancelActive("User dismissed selfie capture")
-      },
+      onUseStubImage = { activeHandler.completeWithStubImage() },
+      onCancel = { activeHandler.cancelActive("User dismissed capture") },
     )
   }
 
@@ -250,7 +266,7 @@ fun JourneyScreen(
       // Cancel any in-flight handler so the JS side doesn't hang waiting on
       // a response that will never arrive (rotation, navigation away, etc.).
       // Wrap the cancel calls so a transient throw on the way out doesn't
-      // skip detach() — mirrors the example-app's onDestroy guard.
+      // skip detach().
       try {
         controller.documentHandler.cancelActive("Journey screen disposed")
         controller.selfieHandler.cancelActive("Journey screen disposed")
@@ -266,12 +282,11 @@ fun JourneyScreen(
  * journeyUrl via `remember` and torn down by DisposableEffect.onDispose.
  *
  * Why a separate class rather than a pile of `remember { }` state in the
- * composable: PARITY.md flags that BridgeHost.delegate is stored as a
- * WeakReference (mirroring iOS's `weak var delegate`). If we constructed
- * the delegate inline at host.delegate = SomeImpl(), it would be eligible
- * for GC the moment composition finished and callbacks would silently stop
- * firing. Holding it as a property of a `remember`d controller keeps it
- * pinned until the screen leaves composition.
+ * composable: BridgeHost.delegate is stored as a WeakReference. If we
+ * constructed the delegate inline at host.delegate = SomeImpl(), it would
+ * be eligible for GC the moment composition finished and callbacks would
+ * silently stop firing. Holding it as a property of a `remember`d
+ * controller keeps it pinned until the screen leaves composition.
  */
 private class BridgeController(hostVersion: String) {
 
@@ -297,14 +312,12 @@ private class BridgeController(hostVersion: String) {
     host.register(documentHandler)
     host.register(selfieHandler)
   }
-
-  var cameraAvailable: Boolean = false
 }
 
 /**
  * BridgeHostDelegate that lifts SDK errors into a Compose-observable
- * `onErrorBanner` callback. Mirrors iOS's reliance on `host.lastError` for
- * a thin red banner at the bottom of the JourneyView.
+ * `onErrorBanner` callback for a thin red banner at the bottom of the
+ * journey view.
  *
  * `onMessage` and `onMessageSent` hooks are kept around as a dev-loop
  * trace channel — wired to logcat so you can see every bridge envelope
@@ -313,13 +326,12 @@ private class BridgeController(hostVersion: String) {
 private class LoggingDelegate : BridgeHostDelegate {
   var onErrorBanner: ((String?) -> Unit)? = null
 
-  // The end-user web app emits `journey.completed` / `journey.failed` /
+  // The web journey emits `journey.completed` / `journey.failed` /
   // `journey.abandoned` as one-way bridge EVENTs (not REQUESTs) when the
-  // journey reaches a terminal state — see useBridgeLifecycleEmitter.ts in
-  // identity-gbggo-end-user-interaction. The event carries `instanceId` and
+  // journey reaches a terminal state. The event carries `instanceId` and
   // `interactionId` in its data map. Because events don't go through the
-  // request/response handler dispatch path, the only place to observe them
-  // on the host side is `onMessage`.
+  // request/response handler dispatch path, the only place to observe
+  // them on the host side is `onMessage`.
   var onTerminalEvent:
     ((status: JourneyTerminalStatus, instanceId: String?, interactionId: String?) -> Unit)? = null
 
@@ -359,43 +371,72 @@ private class LoggingDelegate : BridgeHostDelegate {
   }
 }
 
-@Composable
-private fun DocumentSourceDialog(
-  cameraAvailable: Boolean,
-  onCamera: () -> Unit,
-  onPhotoLibrary: () -> Unit,
-  onCancel: () -> Unit,
-) {
-  AlertDialog(
-    onDismissRequest = onCancel,
-    title = { Text("Capture Document") },
-    text = {
-      Text(
-        text = if (cameraAvailable) {
-          "Choose a capture source. The system camera or photo library result " +
-            "is returned to the journey as a base64-encoded JPEG."
-        } else {
-          "No camera is available on this device — only the photo library option " +
-            "is enabled. Pick an existing image to return to the journey."
-        },
-      )
-    },
-    confirmButton = {
-      if (cameraAvailable) {
-        TextButton(onClick = onCamera) { Text("Camera") }
-      } else {
-        TextButton(onClick = onPhotoLibrary) { Text("Photo Library") }
-      }
-    },
-    dismissButton = {
-      Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
-        if (cameraAvailable) {
-          TextButton(onClick = onPhotoLibrary) { Text("Photo Library") }
-        }
-        TextButton(onClick = onCancel) { Text("Cancel") }
-      }
-    },
-  )
+/**
+ * WebViewClient that preserves the SDK's bridge bootstrap injection (by
+ * calling `super.onPageStarted`) and adds logging for the failure modes that
+ * otherwise present as a silent blank page:
+ *
+ *   - `onReceivedError`     — network/DNS/connection failures (e.g. the
+ *     emulator's DNS-over-TLS hanging so a hostname never resolves).
+ *   - `onReceivedHttpError` — the server responded, but with 4xx/5xx.
+ *   - `onReceivedSslError`  — TLS validation failed. We still `cancel()` (the
+ *     secure default); we only add a log line so the cause is visible.
+ *
+ * Errors for sub-frames / sub-resources are logged at a lower level so the
+ * main-frame navigation failure (the one that blanks the screen) stands out.
+ */
+private class DiagnosticWebViewClient(
+  bootstrapScript: String,
+) : BridgeWebViewConfigurator.BootstrapInjectingWebViewClient(bootstrapScript) {
+
+  override fun onReceivedError(
+    view: WebView,
+    request: android.webkit.WebResourceRequest,
+    error: android.webkit.WebResourceError,
+  ) {
+    super.onReceivedError(view, request, error)
+    val msg = "load error ${error.errorCode} (${error.description}) for ${request.url}"
+    if (request.isForMainFrame) Log.e(TAG, "WebView $msg") else Log.d(TAG, "WebView sub-resource $msg")
+  }
+
+  override fun onReceivedHttpError(
+    view: WebView,
+    request: android.webkit.WebResourceRequest,
+    errorResponse: android.webkit.WebResourceResponse,
+  ) {
+    super.onReceivedHttpError(view, request, errorResponse)
+    val msg = "HTTP ${errorResponse.statusCode} (${errorResponse.reasonPhrase}) for ${request.url}"
+    if (request.isForMainFrame) Log.e(TAG, "WebView $msg") else Log.d(TAG, "WebView sub-resource $msg")
+  }
+
+  override fun onReceivedSslError(
+    view: WebView,
+    handler: android.webkit.SslErrorHandler,
+    error: android.net.http.SslError,
+  ) {
+    // Log, then preserve the secure default (cancel). Do NOT call
+    // handler.proceed() — that would defeat TLS validation.
+    Log.e(TAG, "WebView SSL error ${error.primaryError} for ${error.url}")
+    handler.cancel()
+  }
+}
+
+/**
+ * WebChromeClient that forwards the page's `console.*` output to logcat, so
+ * JavaScript errors thrown inside the journey SPA are visible during a dev
+ * loop instead of vanishing into a blank WebView.
+ */
+private class DiagnosticWebChromeClient : android.webkit.WebChromeClient() {
+  override fun onConsoleMessage(message: android.webkit.ConsoleMessage): Boolean {
+    val line = "WebView console [${message.messageLevel()}] " +
+      "${message.message()} (${message.sourceId()}:${message.lineNumber()})"
+    when (message.messageLevel()) {
+      android.webkit.ConsoleMessage.MessageLevel.ERROR -> Log.e(TAG, line)
+      android.webkit.ConsoleMessage.MessageLevel.WARNING -> Log.w(TAG, line)
+      else -> Log.d(TAG, line)
+    }
+    return true
+  }
 }
 
 internal fun bitmapToBase64Jpeg(bitmap: Bitmap, quality: Int = 85): String {

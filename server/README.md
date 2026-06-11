@@ -4,11 +4,6 @@ A minimal Express server that creates GBG Go journey sessions using the
 Core SDK (`@gbg/go-core`). The Android reference app calls this server to
 obtain a journey URL.
 
-Functionally identical to the iOS reference's companion server — the
-device name and device id in `client.devices.connect(...)` are the only
-substantive differences, so the GBG-side audit trail reflects which host
-produced the session.
-
 ## Prerequisites
 
 - **Node.js 18+**
@@ -32,7 +27,7 @@ Edit `.env` with your credentials:
 | `GO_PASSWORD` | API password |
 | `GO_SERVER_IDX` | Regional server: `0` = EU, `1` = US, `2` = AU |
 | `GO_RESOURCE_ID` | Default resource ID for journeys (overridable per-request) |
-| `GO_SERVER_URL` | Optional — Captain API base URL override |
+| `GO_SERVER_URL` | Optional — GBG Go API base URL override |
 | `PORT` | Server port (default: `3000`) |
 
 ## Running
@@ -99,7 +94,7 @@ reach the server from the emulator, use the canonical loopback alias
 `http://10.0.2.2:3000` — that's the default the **Setup** screen ships
 with.
 
-On a physical device on the same Wi-Fi, replace it with your Mac's LAN
-IP (e.g. `http://192.168.1.100:3000`). You may also need to flip
-`android:usesCleartextTraffic` and/or the
+On a physical device on the same Wi-Fi, replace it with the host
+machine's LAN IP (e.g. `http://192.168.1.100:3000`). You may also need
+to flip `android:usesCleartextTraffic` and/or the
 `network_security_config.xml` allowlist for non-loopback hosts.
