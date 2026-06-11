@@ -35,14 +35,66 @@ const SERVER_IDX = parseInt(process.env.GO_SERVER_IDX || "0", 10);
 const REGIONS = ["EU", "US", "AU"];
 const SERVER_URL = process.env.GO_SERVER_URL || undefined;
 
+// Server selection, shared by auth and every Captain call so they can never
+// target different environments.
+//
+//   - No GO_SERVER_URL  → prod: select the regional server by index. The SDK
+//     maps SERVER_IDX to the correct per-operation URL (the token endpoint and
+//     the Captain endpoints have separate server lists), so this is the single
+//     region knob for prod.
+//   - GO_SERVER_URL set → a custom/nonprod host (e.g. the demo fabric env).
+//     Used verbatim for Captain calls. The token endpoint lives at the host
+//     ROOT, not under /v2/captain, so we strip that suffix to derive the auth
+//     base — mirroring the two separate server lists the SDK ships.
+const CAPTAIN_OPTS = SERVER_URL
+  ? { serverURL: SERVER_URL }
+  : { serverIdx: SERVER_IDX };
+const AUTH_OPTS = SERVER_URL
+  ? { serverURL: SERVER_URL.replace(/\/v2\/captain\/?$/, "") }
+  : { serverIdx: SERVER_IDX };
+
+if (
+  !SERVER_URL &&
+  (!Number.isInteger(SERVER_IDX) ||
+    SERVER_IDX < 0 ||
+    SERVER_IDX >= REGIONS.length)
+) {
+  console.warn(
+    `GO_SERVER_IDX=${process.env.GO_SERVER_IDX} is not a valid index ` +
+      `(expected an integer 0–${REGIONS.length - 1}); SDK calls will fail ` +
+      `until corrected.`
+  );
+}
+
 const app = express();
 app.use(express.json());
 
 // ---------------------------------------------------------------------------
-// Authentication — generate an access token on startup
+// Authentication
 // ---------------------------------------------------------------------------
+//
+// GBG Go issues short-lived access tokens (the `expiresIn` below is in
+// seconds — typically only a few minutes) and the password grant returns NO
+// refresh token. So "renewal" is simply re-running the same password auth
+// with the stored credentials.
+//
+// We authenticate lazily: `getValidToken()` re-authenticates on demand when
+// the cached token is missing or within REFRESH_SKEW_MS of expiry, so a
+// long-running server keeps working instead of silently 401-ing until it's
+// restarted. A startup call still runs as a fail-fast smoke check.
+
+// Re-authenticate this many ms before the token's stated expiry, so an
+// in-flight request never races the boundary and lands on a just-expired
+// token.
+const REFRESH_SKEW_MS = 30_000;
+// Fallback lifetime if the auth response omits `expiresIn` (optional in the
+// SDK schema). Deliberately short so we re-auth often rather than trust a
+// stale token.
+const FALLBACK_TTL_MS = 60_000;
 
 let customerAccessToken = null;
+let tokenExpiresAt = 0; // epoch ms; 0 = no valid token cached
+let authInFlight = null; // shared promise so concurrent callers auth once
 
 async function authenticate() {
   const go = new Go();
@@ -54,12 +106,51 @@ async function authenticate() {
       password: process.env.GO_PASSWORD,
       grantType: "password",
     },
-    {
-      serverURL: "https://gbggo4-demo-au.nonprod.fabric.gbgplatforms.com",
-    }
+    AUTH_OPTS
   );
+  // `accessToken` is optional in the SDK's response schema. A 200 with no
+  // token would otherwise be cached as `undefined` (then re-auth on every
+  // request and surface downstream as an opaque 500) — fail loudly instead.
+  if (!auth.accessToken) {
+    throw new Error("Authentication succeeded but no accessToken was returned");
+  }
   customerAccessToken = auth.accessToken;
-  console.log(`Authenticated with GBG Go (${REGIONS[SERVER_IDX]} region)`);
+  const ttlMs =
+    typeof auth.expiresIn === "number" ? auth.expiresIn * 1000 : FALLBACK_TTL_MS;
+  tokenExpiresAt = Date.now() + ttlMs;
+  if (typeof auth.expiresIn !== "number") {
+    console.warn(
+      `Auth response omitted expiresIn; assuming ${FALLBACK_TTL_MS / 1000}s lifetime`
+    );
+  }
+  // Report the actual target, not just the index — when GO_SERVER_URL is set
+  // it (not the region index) is what's really in effect.
+  const target = SERVER_URL
+    ? SERVER_URL
+    : `${REGIONS[SERVER_IDX] ?? "?"} region (serverIdx ${SERVER_IDX})`;
+  console.log(
+    `Authenticated with GBG Go [${target}], ` +
+      `token valid for ${Math.round(ttlMs / 1000)}s`
+  );
+}
+
+/**
+ * Return a non-expired customer access token, re-authenticating if the cached
+ * one is missing or about to expire. Concurrent callers share a single
+ * in-flight auth so a burst of requests doesn't trigger a burst of logins.
+ * Throws if authentication fails (e.g. bad credentials).
+ */
+async function getValidToken() {
+  if (customerAccessToken && Date.now() < tokenExpiresAt - REFRESH_SKEW_MS) {
+    return customerAccessToken;
+  }
+  if (!authInFlight) {
+    authInFlight = authenticate().finally(() => {
+      authInFlight = null;
+    });
+  }
+  await authInFlight;
+  return customerAccessToken;
 }
 
 // ---------------------------------------------------------------------------
@@ -82,56 +173,6 @@ app.get("/health", (_req, res) => {
 });
 
 /**
- * GET /api/journey/:instanceId/state — fetch the authoritative outcome
- *
- * The Android app calls this from its Result screen after the web journey
- * has signalled a terminal state over the bridge. The bridge event tells the
- * app *that* the journey ended; this endpoint returns *what* the outcome was
- * (verdict, collected data, decision details) by calling the GBG Go Core
- * SDK's `journeys.getState`.
- *
- * Note for integrators: in production the canonical pattern is to receive
- * Captain webhooks on your backend and push updates to the app via your own
- * channel (push notifications, server-sent events, GraphQL subscriptions),
- * not to have the app poll. The endpoint below is wired this way to keep the
- * reference build simple and self-contained.
- */
-app.get("/api/journey/:instanceId/state", async (req, res) => {
-  try {
-    if (!customerAccessToken) {
-      return res.status(503).json({
-        error: "Server not authenticated. Check your .env credentials.",
-      });
-    }
-
-    const serverOpts = SERVER_URL ? { serverURL: SERVER_URL } : {};
-    const client = new Go({ customerAccess: customerAccessToken });
-
-    const state = await client.journeys.getState(
-      { instanceId: req.params.instanceId },
-      serverOpts,
-    );
-    res.json(state);
-  } catch (err) {
-    const cause = err?.cause?.message;
-    const httpStatus = err?.statusCode ?? err?.rawResponse?.status;
-    console.error(
-      "getState failed:",
-      err?.constructor?.name ?? "Error",
-      "—",
-      err.message,
-    );
-    if (httpStatus) console.error("  HTTP status:", httpStatus);
-    if (cause) console.error("  Cause:", cause);
-    res.status(500).json({
-      error: "Failed to fetch journey state",
-      message: err.message,
-      detail: cause ?? undefined,
-    });
-  }
-});
-
-/**
  * POST /api/journey/start — create a new journey session
  *
  * Request body (all fields optional):
@@ -149,14 +190,18 @@ app.get("/api/journey/:instanceId/state", async (req, res) => {
  */
 app.post("/api/journey/start", async (req, res) => {
   try {
-    if (!customerAccessToken) {
+    let token;
+    try {
+      token = await getValidToken();
+    } catch (authErr) {
       return res.status(503).json({
         error: "Server not authenticated. Check your .env credentials.",
+        message: authErr.message,
       });
     }
 
-    const serverOpts = SERVER_URL ? { serverURL: SERVER_URL } : {};
-    const client = new Go({ customerAccess: customerAccessToken });
+    const serverOpts = CAPTAIN_OPTS;
+    const client = new Go({ customerAccess: token });
 
     // Step 1: Start a journey session
     const journey = await client.journeys.start(
@@ -178,7 +223,7 @@ app.post("/api/journey/start", async (req, res) => {
       },
       serverOpts
     );
-    console.log("Device registered:", device.deviceId);
+    console.log("Device registered:", device);
     // Step 3: Connect the device to obtain an end-user token
     const connection = await client.devices.connect(
       { deviceConnect: device.connectToken },
@@ -192,7 +237,7 @@ app.post("/api/journey/start", async (req, res) => {
       },
       serverOpts
     );
-
+    console.log("Device connected:", connection);
     // Step 4: Fetch the interaction to validate the session
     const unauthenticatedClient = new Go();
     let interactions;
@@ -235,7 +280,7 @@ app.post("/api/journey/start", async (req, res) => {
       connectToken: device.connectToken,
       expiresIn: device.expiresIn,
     };
-    console.log("Journey started:", result.instanceId);
+    console.log("Journey started:", result);
     res.json(result);
   } catch (err) {
     // The SDK's typed errors carry diagnostic state the bare `err.message`
@@ -275,25 +320,83 @@ app.post("/api/journey/start", async (req, res) => {
   }
 });
 
+/**
+ * GET /api/journey/:instanceId/state — fetch the authoritative outcome
+ *
+ * The Android app calls this from its Result screen after the web journey
+ * has signalled a terminal state over the bridge. The bridge event tells the
+ * app *that* the journey ended; this endpoint returns *what* the outcome was
+ * (verdict, collected data, decision details) by calling the GBG Go Core
+ * SDK's `journeys.getState`.
+ *
+ * Note for integrators: in production the canonical pattern is to receive
+ * Captain webhooks on your backend and push updates to the app via your own
+ * channel (push notifications, server-sent events, GraphQL subscriptions),
+ * not to have the app poll. The endpoint below is wired this way to keep the
+ * reference build simple and self-contained.
+ */
+app.get("/api/journey/:instanceId/state", async (req, res) => {
+  try {
+    let token;
+    try {
+      token = await getValidToken();
+    } catch (authErr) {
+      return res.status(503).json({
+        error: "Server not authenticated. Check your .env credentials.",
+        message: authErr.message,
+      });
+    }
+
+    const serverOpts = CAPTAIN_OPTS;
+    const client = new Go({ customerAccess: token });
+
+    const state = await client.journeys.getState(
+      { instanceId: req.params.instanceId },
+      serverOpts,
+    );
+    res.json(state);
+  } catch (err) {
+    const cause = err?.cause?.message;
+    const httpStatus = err?.statusCode ?? err?.rawResponse?.status;
+    console.error(
+      "getState failed:",
+      err?.constructor?.name ?? "Error",
+      "—",
+      err.message,
+    );
+    if (httpStatus) console.error("  HTTP status:", httpStatus);
+    if (cause) console.error("  Cause:", cause);
+    res.status(500).json({
+      error: "Failed to fetch journey state",
+      message: err.message,
+      detail: cause ?? undefined,
+    });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
 
 async function start() {
+  // Fail-fast smoke check. Authentication is lazy (see getValidToken), so a
+  // transient failure here isn't fatal — routes will retry on demand — but a
+  // misconfiguration (bad credentials) is worth surfacing loudly at startup.
   try {
     await authenticate();
   } catch (err) {
-    console.error("Authentication failed:", err.message);
+    console.error("Startup authentication failed:", err.message);
     console.error(
-      "The server will start, but /api/journey/start will return 503."
+      "The server will still start and retry auth on the first request, " +
+        "but if this is a credentials problem those requests will return 503."
     );
-    console.error("Check your .env credentials and try restarting.");
+    console.error("Check your .env credentials.");
   }
 
   app.listen(PORT, () => {
     console.log(`Server listening on http://localhost:${PORT}`);
-    console.log(`  GET  /                              — status`);
-    console.log(`  GET  /health                        — health check`);
+    console.log(`  GET  /                    — status`);
+    console.log(`  GET  /health              — health check`);
     console.log(`  POST /api/journey/start             — create journey session`);
     console.log(`  GET  /api/journey/:instanceId/state — fetch journey outcome`);
   });

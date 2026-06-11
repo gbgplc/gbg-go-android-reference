@@ -1,15 +1,15 @@
 // CameraCaptureHandler.kt
 //
-// A `BridgeCapabilityHandler` for the wire-level capture actions the iOS
-// reference's typed slots map to:
+// A `BridgeCapabilityHandler` for the wire-level capture actions the web
+// journey can request:
 //
 //   - "camera.document.capture" — document photo
 //   - "camera.selfie.capture"   — selfie photo
 //
-// Mirrors the slot lifecycle in spirit — single concurrent request guarded
-// by a `BUSY` response, callable cancel/error paths from the UI. PARITY.md
-// flags typed slots as deferred on Android; this handler is the manual
-// wiring that the iOS BridgeHost auto-generates from `host.documentCapture`.
+// One handler instance per action. Each instance enforces a single
+// concurrent request (a second request while one is active gets a `BUSY`
+// error response), and exposes callable success / cancel / error paths
+// that the host UI drives once the user finishes capture.
 
 package com.gbg.go.reference.ui.journey
 
@@ -40,8 +40,9 @@ internal class CameraCaptureHandler(
 
   override fun handle(request: BridgeMessage, responder: BridgeResponder) {
     if (activeResponder != null) {
-      // PARITY.md doesn't enforce single-flight at the SDK level — the iOS
-      // typed slot does this and we mirror the behaviour for parity.
+      // The SDK doesn't enforce single-flight, so the handler does it
+      // here. Two concurrent capture requests for the same action would
+      // race for the same camera surface and responder slot.
       responder.respond(
         status = BridgeResponseStatus.ERROR,
         error = BridgeErrorPayload(
@@ -69,7 +70,12 @@ internal class CameraCaptureHandler(
   fun onPickerResult(context: Context, uri: Uri?) {
     val responder = activeResponder ?: return
     if (uri == null) {
-      cancelled(responder, "User cancelled image selection")
+      // The user opened the system photo picker and backed out without
+      // choosing an image. That dismisses the picker only — it must NOT
+      // cancel the whole capture request, or the journey would receive a
+      // spurious CANCELLED and the capture surface (which still offers the
+      // camera and placeholder paths) would be torn down. Leave the request
+      // active and return to the capture surface.
       return
     }
     val bitmap = try {
@@ -86,10 +92,9 @@ internal class CameraCaptureHandler(
   }
 
   /**
-   * Returns a synthetic placeholder bitmap so the simulator/emulator path
-   * has something to send. Mirrors iOS's `SimulatorSelfieCaptureView`
-   * fallback — useful for end-to-end bridge round-trip testing without a
-   * real camera.
+   * Returns a synthetic placeholder bitmap so the emulator path has
+   * something to send. Useful for end-to-end bridge round-trip testing
+   * without a real camera.
    */
   fun completeWithStubImage() {
     val responder = activeResponder ?: return

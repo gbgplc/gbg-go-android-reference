@@ -1,16 +1,16 @@
 // SetupScreen.kt
 //
-// The first screen the user sees. Mirrors the iOS reference's `SetupView`:
-// two inputs (companion server URL + optional resource id) and a Start
-// Journey button. On tap, calls JourneyService.startJourney → navigates to
-// JourneyScreen with the returned URL.
+// The first screen the user sees: two inputs (companion server URL +
+// optional resource id) and a Start Journey button. On tap, calls
+// JourneyService.startJourney → navigates to JourneyScreen with the
+// returned URL.
 //
-// Persistence: SharedPreferences stand in for SwiftUI's `@AppStorage`. The
-// values default to `http://10.0.2.2:3000` because that's the emulator's
-// loopback address for a server running on the developer's Mac. (The iOS
-// reference defaults to `http://localhost:3000` which works on Simulator;
-// the Android emulator routes `localhost` to the emulator itself, so the
-// loopback alias is the equivalent.)
+// Persistence: SharedPreferences holds the last-used values across
+// launches. The server URL defaults to `http://10.0.2.2:3000` — the
+// Android emulator's loopback alias for a server running on the host
+// machine. (The emulator routes `localhost` / `127.0.0.1` to the emulator
+// itself, not the host, so the alias is required for reaching a local
+// companion server.)
 
 package com.gbg.go.reference.ui.setup
 
@@ -59,7 +59,7 @@ private const val KEY_RESOURCE_ID = "resourceId"
 
 // `localhost` from inside the Android emulator points at the emulator
 // itself, not the host machine. `10.0.2.2` is the canonical loopback alias
-// for the host, mirroring what `localhost` does on iOS Simulator.
+// for the host.
 private const val DEFAULT_SERVER_URL = "http://10.0.2.2:3000"
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -126,7 +126,7 @@ fun SetupScreen(onJourneyStarted: (journeyUrl: String, serverUrl: String) -> Uni
         Text(
           text = "The companion server creates journey sessions using the " +
             "GBG Go Core SDK. See server/README.md for setup. From the " +
-            "Android emulator use 10.0.2.2 to reach a server on your Mac.",
+            "Android emulator use 10.0.2.2 to reach a server on the host.",
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

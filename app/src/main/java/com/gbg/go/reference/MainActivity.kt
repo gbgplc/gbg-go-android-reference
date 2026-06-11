@@ -1,11 +1,11 @@
 // MainActivity.kt
 //
-// The single Activity that hosts the Compose navigation graph. Mirrors the
-// iOS reference's `GBGGoReferenceApp` (entry point) plus `RootView`
-// (NavigationStack). Two destinations:
+// The single Activity that hosts the Compose navigation graph. Three
+// destinations:
 //
 //   1. SetupScreen   — server URL + resource id input → Start Journey
 //   2. JourneyScreen — BridgeWebView host + capture handlers
+//   3. ResultScreen  — terminal outcome + optional state fetch
 //
 // Lifecycle note: BridgeHost lives on the JourneyScreen route's lifecycle
 // (constructed inside a remember { } there, attached / detached by a
