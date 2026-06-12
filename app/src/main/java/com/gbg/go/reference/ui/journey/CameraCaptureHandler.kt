@@ -19,11 +19,13 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.net.Uri
+import android.util.Base64
 import com.gbg.gbgbridge.core.BridgeCapabilityHandler
 import com.gbg.gbgbridge.core.BridgeResponder
 import com.gbg.gbgbridge.models.BridgeErrorPayload
 import com.gbg.gbgbridge.models.BridgeMessage
 import com.gbg.gbgbridge.models.BridgeResponseStatus
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 
 internal class CameraCaptureHandler(
@@ -106,16 +108,61 @@ internal class CameraCaptureHandler(
     cancelled(responder, reason)
   }
 
-  private fun success(responder: BridgeResponder, bitmap: Bitmap) {
+  // ---------------------------------------------------------------------------
+  // Smart Capture (Part 2) entry points.
+  //
+  // These are the seam the Smart Capture SDK drives instead of the stub
+  // capture surface. They build the SAME success response shape as the stub
+  // paths — the bridge contract is unchanged — with the selfie path adding the
+  // encrypted liveness blob the FaceCamera SDK produces. Kept deliberately
+  // SDK-agnostic (plain Bitmap / ByteArray) so this file has no dependency on
+  // the com.gbg.smartcapture types; SmartCaptureLauncher does the mapping.
+  // ---------------------------------------------------------------------------
+
+  /** Smart Capture document result: a (rotation-corrected) document image. */
+  fun completeWithSmartCaptureImage(bitmap: Bitmap) {
+    val responder = activeResponder ?: return
+    success(responder, bitmap)
+  }
+
+  /**
+   * Smart Capture selfie result: the preview photo plus the encrypted biometric
+   * blob from the liveness check. The blob is forwarded base64-encoded under
+   * `encryptedBlob` so the journey can pass it to server-side validation —
+   * matching the iOS reference, whose selfie result carries the same blob.
+   */
+  fun completeWithSmartCaptureSelfie(previewPhoto: Bitmap, encryptedBlob: ByteArray) {
+    val responder = activeResponder ?: return
+    success(
+      responder,
+      previewPhoto,
+      extraData = mapOf(
+        "encryptedBlob" to JsonPrimitive(Base64.encodeToString(encryptedBlob, Base64.NO_WRAP)),
+      ),
+    )
+  }
+
+  /** Smart Capture failure (SDK error / no result) for the active request. */
+  fun failActive(message: String) {
+    val responder = activeResponder ?: return
+    error(responder, "CAPTURE_FAILED", message)
+  }
+
+  private fun success(
+    responder: BridgeResponder,
+    bitmap: Bitmap,
+    extraData: Map<String, JsonElement> = emptyMap(),
+  ) {
     val base64 = bitmapToBase64Jpeg(bitmap)
     responder.respond(
       status = BridgeResponseStatus.SUCCESS,
-      data = mapOf(
-        "imageBase64" to JsonPrimitive(base64),
-        "imageWidth" to JsonPrimitive(bitmap.width),
-        "imageHeight" to JsonPrimitive(bitmap.height),
-        "mimeType" to JsonPrimitive("image/jpeg"),
-      ),
+      data = buildMap {
+        put("imageBase64", JsonPrimitive(base64))
+        put("imageWidth", JsonPrimitive(bitmap.width))
+        put("imageHeight", JsonPrimitive(bitmap.height))
+        put("mimeType", JsonPrimitive("image/jpeg"))
+        putAll(extraData)
+      },
     )
     finish()
   }

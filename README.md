@@ -1,17 +1,41 @@
-# GBG Go Android Reference
+# GBG Go Android Reference — Part 2: Smart Capture SDK Integration
+
+> **Branch:** `part-2-smart-capture` — builds on the [Part 1 reference](../../tree/main)
+> (`main` branch), which covers core bridge integration with the stub capture
+> surface.
 
 A complete, runnable reference integration of the GBG Go identity
-verification journey in an Android app using the **GBGBridge Android SDK**.
+verification journey in an Android app using the **GBGBridge Android SDK**,
+**with the real Smart Capture SDKs** for document scanning and face capture
+with liveness detection.
 
 This project demonstrates:
 
-- Calling a companion server to obtain a journey URL
-- Hosting the journey inside a `WebView` via `BridgeWebViewConfigurator` +
-  `BridgeHost.attach(...)`
-- Implementing `BridgeCapabilityHandler`s for `camera.document.capture`
-  and `camera.selfie.capture` with system-camera + photo-library fallback
-- Returning `success` / `cancelled` / `error` results back to the journey
-  via `BridgeResponder.respond(...)`
+- Everything from Part 1 (journey URL, `BridgeWebView`, the bridge protocol,
+  the stub capture surface)
+- **Replacing the stub capture surface with the Smart Capture SDKs** —
+  guided document scanning with auto-crop and quality scoring
+  (`com.gbg.smartcapture:documentcamera`), and face capture with liveness
+  detection plus an encrypted biometric blob (`com.gbg.smartcapture:facecamera`)
+- A runtime fallback to the stub surface on emulators / no-camera devices, so
+  the journey still runs end-to-end without real hardware
+
+## What changed from Part 1
+
+The bridge architecture was designed so swapping the stub surface for real
+SDKs is a small, localised change — the handler registration, the
+`BridgeResponder` contract, and the wire format are all unchanged:
+
+| File | Change |
+|------|--------|
+| `app/src/main/java/com/gbg/go/reference/ui/capture/SmartCaptureLauncher.kt` | New — maps the Smart Capture Activities onto `CameraCaptureHandler` |
+| `app/src/main/java/com/gbg/go/reference/ui/capture/DeviceCapabilities.kt` | New — decides Smart Capture vs stub fallback at runtime |
+| `app/src/main/java/com/gbg/go/reference/ui/journey/CameraCaptureHandler.kt` | Modified — Smart Capture success paths (selfie forwards the encrypted blob) |
+| `app/src/main/java/com/gbg/go/reference/ui/journey/JourneyScreen.kt` | Modified — launches the SDK on real devices, falls back to the stub surface otherwise |
+| `app/build.gradle.kts` + `settings.gradle.kts` | Modified — Smart Capture dependencies + their S3 Maven repo |
+
+Everything else — the companion server, `JourneyService`, the bridge wiring,
+`CaptureStubScreen` — is identical to Part 1.
 
 ## Prerequisites
 
@@ -22,16 +46,35 @@ This project demonstrates:
 - **Node.js 18+** for the companion server
 - **GBG Go account** with API credentials (client ID / secret, username /
   password)
+- **Smart Capture SDK access** — the AWS access key / secret for the
+  Smart Capture Maven repository, obtained from your GBG account
+  representative. Building this branch requires them (see
+  [Enabling Smart Capture](#enabling-smart-capture)); the
+  [Part 1 branch](../../tree/main) needs none of this.
 
 ## Quick start
 
-### 1. Add the GBGBridge SDK
+### 1. Clone and check out Part 2
+
+```bash
+git clone https://github.com/gbgplc/gbg-go-android-reference.git
+cd gbg-go-android-reference
+git checkout part-2-smart-capture
+```
+
+### 2. Add the SDKs
 
 The reference app depends on `com.gbg:gbgbridge-sdk:1.1.0`, which is
-published to [Maven Central](https://central.sonatype.com/artifact/com.gbg/gbgbridge-sdk).
-The build resolves it automatically — no extra setup required.
+published to [Maven Central](https://central.sonatype.com/artifact/com.gbg/gbgbridge-sdk)
+and resolves automatically.
 
-### 2. Set up the companion server
+This branch additionally depends on the Smart Capture SDKs
+(`com.gbg.smartcapture:{commons,documentcamera,facecamera}`), which are served
+from a credentialed S3 Maven repository — **the build will not resolve them
+until you add your Smart Capture credentials**. See
+[Enabling Smart Capture](#enabling-smart-capture) below.
+
+### 3. Set up the companion server
 
 The Android reference ships its own companion server under `server/`.
 
@@ -47,7 +90,7 @@ node index.mjs
 See [`server/README.md`](server/README.md) for the full endpoint reference
 and environment-variable list.
 
-### 3. Open and run
+### 4. Open and run
 
 ```bash
 cd <path>/gbg-go-android-reference
@@ -61,6 +104,11 @@ The app launches on the **Setup** screen. From the **Android emulator** the
 companion server's `localhost:3000` is reachable as
 `http://10.0.2.2:3000` — the default in the URL field. On a real device
 on the same Wi-Fi, replace it with your machine's LAN IP.
+
+Capture behaviour depends on the hardware: on a **real device** the journey's
+document and selfie requests open the Smart Capture SDK screens; on an
+**emulator** (no usable camera) it automatically falls back to the stub
+capture surface.
 
 ## Project structure
 
@@ -84,7 +132,10 @@ gbg-go-android-reference/
 │       │   │   ├── JourneyScreen.kt      # WebView host + bridge wiring
 │       │   │   ├── JourneyService.kt     # Companion-server HTTP client
 │       │   │   └── CameraCaptureHandler.kt  # camera.* capability handler
-│       │   ├── ui/capture/CaptureStubScreen.kt  # Full-screen capture surface
+│       │   ├── ui/capture/
+│       │   │   ├── CaptureStubScreen.kt    # Stub surface (emulator fallback)
+│       │   │   ├── SmartCaptureLauncher.kt # Smart Capture SDK ↔ handler glue
+│       │   │   └── DeviceCapabilities.kt   # Smart Capture vs stub decision
 │       │   └── ui/theme/Theme.kt
 │       └── res/
 │           ├── values/strings.xml
@@ -141,6 +192,69 @@ are:
    retention chain, but explicit detach is what releases the JS interface.
 5. **Cancel in-flight handlers** before detach so the JS side doesn't
    hang on a response that never arrives.
+
+## Enabling Smart Capture
+
+The Smart Capture SDKs are distributed from a **credentialed S3 Maven
+repository**, not Maven Central — so unlike `gbgbridge-sdk` they are not
+committed to or resolvable from this repo without access.
+
+### 1. Obtain credentials
+
+Contact your GBG account representative for the Smart Capture Maven access
+key and secret.
+
+### 2. Add the credentials (never commit them)
+
+Put them in your **user-global** Gradle properties — `~/.gradle/gradle.properties`,
+which lives outside any repository and so can never be committed:
+
+```properties
+awsAccessKey=YOUR_ACCESS_KEY_ID
+awsSecretKey=YOUR_SECRET_ACCESS_KEY
+```
+
+CI environments can instead export them as environment variables:
+
+```bash
+export ORG_GRADLE_PROJECT_awsAccessKey=YOUR_ACCESS_KEY_ID
+export ORG_GRADLE_PROJECT_awsSecretKey=YOUR_SECRET_ACCESS_KEY
+```
+
+`settings.gradle.kts` reads these and registers the S3 repository only when
+both are present. Do **not** put them in the repo's `gradle.properties`,
+`local.properties`, or `settings.gradle.kts` — this is a public reference
+repository.
+
+### 3. Build and run on a device
+
+```bash
+./gradlew :app:assembleDebug
+```
+
+Smart Capture needs real camera hardware, so build and run on a **physical
+device**. On an emulator the app falls back to the stub capture surface even
+with credentials configured.
+
+## Without Smart Capture
+
+If you don't have Smart Capture access, build the [Part 1 reference](../../tree/main)
+on `main` instead — it behaves identically up to the capture surface and needs
+no extra credentials. (Checking out this branch without credentials fails at
+Gradle dependency resolution, before anything compiles.)
+
+## Branch structure
+
+| Branch | Content |
+|--------|---------|
+| [`main`](../../tree/main) | Part 1 — core bridge integration with the stub capture surface |
+| `part-2-smart-capture` | Part 2 — Smart Capture SDK integration (this branch) |
+
+To see exactly what Part 2 adds, diff the branches:
+
+```bash
+git diff main..part-2-smart-capture
+```
 
 ## License
 
