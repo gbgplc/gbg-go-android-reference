@@ -65,6 +65,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.gbg.go.reference.ui.capture.CaptureMode
 import com.gbg.go.reference.ui.capture.CaptureStubScreen
+import com.gbg.go.reference.ui.capture.DeviceCapabilities
+import com.gbg.go.reference.ui.capture.SmartCaptureLauncher
 import com.gbg.gbgbridge.core.BridgeCapabilityInfo
 import com.gbg.gbgbridge.core.BridgeConfiguration
 import com.gbg.gbgbridge.core.BridgeHost
@@ -97,6 +99,12 @@ fun JourneyScreen(
   onJourneyEnded: (status: JourneyTerminalStatus, instanceId: String?, interactionId: String?) -> Unit,
 ) {
   val context = LocalContext.current
+
+  // PART 2 — Smart Capture vs stub decision, made once for this screen.
+  // On real devices we hand capture off to the Smart Capture SDKs; on
+  // emulators / no-camera devices we keep the stub surface so the journey
+  // still runs end-to-end (the Android analogue of iOS's simulator fallback).
+  val useSmartCapture = remember { DeviceCapabilities.supportsSmartCapture(context) }
 
   // The BridgeHost lives for the lifetime of this screen. Compose's
   // `remember` keeps it across recompositions but releases on navigation
@@ -131,6 +139,22 @@ fun JourneyScreen(
     controller.selfieHandler.onPickerResult(context, uri)
   }
 
+  // PART 2 — Smart Capture activity launchers. The SDKs present full-screen
+  // Activities (not Compose overlays), so we launch them via the standard
+  // StartActivityForResult contract and route the result back through the
+  // same handler the stub path uses. Only created/used when useSmartCapture.
+  val launchSmartCaptureDocument = rememberLauncherForActivityResult(
+    ActivityResultContracts.StartActivityForResult(),
+  ) { result ->
+    SmartCaptureLauncher.handleDocumentResult(result, controller.documentHandler)
+  }
+
+  val launchSmartCaptureSelfie = rememberLauncherForActivityResult(
+    ActivityResultContracts.StartActivityForResult(),
+  ) { result ->
+    SmartCaptureLauncher.handleSelfieResult(result, controller.selfieHandler)
+  }
+
   // Wire the handlers' "I need a UI" callbacks back to Compose state.
   // The terminal-event hook navigates forward; once it fires the host is torn
   // down by the route change, so guard against re-entry with a one-shot flag.
@@ -150,6 +174,24 @@ fun JourneyScreen(
         terminalFired = true
         onJourneyEnded(status, instanceId, interactionId)
       }
+    }
+  }
+
+  // PART 2 — when a capture becomes active and this device uses Smart Capture,
+  // launch the corresponding SDK Activity. Keyed on `activeCapture` so it fires
+  // exactly once per activation (and is a no-op when it resets to null after
+  // the handler completes). On stub devices this does nothing and the
+  // CaptureStubScreen below is shown instead.
+  LaunchedEffect(activeCapture, useSmartCapture) {
+    if (!useSmartCapture) return@LaunchedEffect
+    when (activeCapture) {
+      CaptureMode.Document -> launchSmartCaptureDocument.launch(
+        SmartCaptureLauncher.documentIntent(context),
+      )
+      CaptureMode.Selfie -> launchSmartCaptureSelfie.launch(
+        SmartCaptureLauncher.selfieIntent(context),
+      )
+      null -> Unit
     }
   }
 
@@ -242,28 +284,33 @@ fun JourneyScreen(
     }
   }
 
-  activeCapture?.let { mode ->
-    val activeHandler = when (mode) {
-      CaptureMode.Document -> controller.documentHandler
-      CaptureMode.Selfie -> controller.selfieHandler
+  // Stub capture surface — shown only when this device falls back from Smart
+  // Capture (emulator / no camera). On real devices the SDK Activity launched
+  // by the effect above owns the capture UI instead.
+  if (!useSmartCapture) {
+    activeCapture?.let { mode ->
+      val activeHandler = when (mode) {
+        CaptureMode.Document -> controller.documentHandler
+        CaptureMode.Selfie -> controller.selfieHandler
+      }
+      val activePicker = when (mode) {
+        CaptureMode.Document -> pickDocumentImage
+        CaptureMode.Selfie -> pickSelfieImage
+      }
+      CaptureStubScreen(
+        mode = mode,
+        onCapture = { bitmap -> activeHandler.onCameraResult(bitmap) },
+        onPickFromLibrary = {
+          activePicker.launch(
+            PickVisualMediaRequest(
+              ActivityResultContracts.PickVisualMedia.ImageOnly,
+            ),
+          )
+        },
+        onUseStubImage = { activeHandler.completeWithStubImage() },
+        onCancel = { activeHandler.cancelActive("User dismissed capture") },
+      )
     }
-    val activePicker = when (mode) {
-      CaptureMode.Document -> pickDocumentImage
-      CaptureMode.Selfie -> pickSelfieImage
-    }
-    CaptureStubScreen(
-      mode = mode,
-      onCapture = { bitmap -> activeHandler.onCameraResult(bitmap) },
-      onPickFromLibrary = {
-        activePicker.launch(
-          PickVisualMediaRequest(
-            ActivityResultContracts.PickVisualMedia.ImageOnly,
-          ),
-        )
-      },
-      onUseStubImage = { activeHandler.completeWithStubImage() },
-      onCancel = { activeHandler.cancelActive("User dismissed capture") },
-    )
   }
 
   DisposableEffect(controller) {

@@ -56,6 +56,20 @@ dependencies {
   // https://central.sonatype.com/artifact/com.gbg/gbgbridge-sdk
   implementation("com.gbg:gbgbridge-sdk:0.1.0-alpha01")
 
+  // PART 2 — Smart Capture SDKs.
+  //
+  // Real document scanning (guided capture, auto-crop, quality scoring) and
+  // face capture with liveness detection + encrypted biometric blobs. On real
+  // devices these replace the CameraX/stub capture surface; on emulators (no
+  // usable camera) the app falls back to CaptureStubScreen at runtime.
+  //
+  // Distributed from a credentialed S3 Maven repo — see settings.gradle.kts.
+  // Building this branch requires Smart Capture access; the `main` branch
+  // (Part 1) needs none of these.
+  implementation("com.gbg.smartcapture:commons:1.1.2")
+  implementation("com.gbg.smartcapture:documentcamera:1.1.2")
+  implementation("com.gbg.smartcapture:facecamera:1.1.2")
+
   implementation("androidx.core:core-ktx:1.13.1")
   implementation("androidx.activity:activity-compose:1.9.2")
   implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")
