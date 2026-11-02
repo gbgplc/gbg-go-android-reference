@@ -54,7 +54,7 @@ android {
 dependencies {
   // The GBGBridge SDK, published to Maven Central.
   // https://central.sonatype.com/artifact/com.gbg/gbgbridge-sdk
-  implementation("com.gbg:gbgbridge-sdk:0.1.0-alpha01")
+  implementation("com.gbg:gbgbridge-sdk:1.1.0")
 
   implementation("androidx.core:core-ktx:1.13.1")
   implementation("androidx.activity:activity-compose:1.9.2")

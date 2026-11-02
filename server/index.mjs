@@ -34,24 +34,39 @@ const PORT = process.env.PORT || 3000;
 const SERVER_IDX = parseInt(process.env.GO_SERVER_IDX || "0", 10);
 const REGIONS = ["EU", "US", "AU"];
 const SERVER_URL = process.env.GO_SERVER_URL || undefined;
+const AUTH_URL = process.env.GO_AUTH_URL || undefined;
 
-// Server selection, shared by auth and every Captain call so they can never
+// Captain server selection, shared by every Captain call so they can never
 // target different environments.
 //
-//   - No GO_SERVER_URL  → prod: select the regional server by index. The SDK
-//     maps SERVER_IDX to the correct per-operation URL (the token endpoint and
-//     the Captain endpoints have separate server lists), so this is the single
-//     region knob for prod.
-//   - GO_SERVER_URL set → a custom/nonprod host (e.g. the demo fabric env).
-//     Used verbatim for Captain calls. The token endpoint lives at the host
-//     ROOT, not under /v2/captain, so we strip that suffix to derive the auth
-//     base — mirroring the two separate server lists the SDK ships.
+//   - No GO_SERVER_URL  → prod: select the regional Captain server by index.
+//   - GO_SERVER_URL set → a custom/nonprod host (e.g. the demo fabric env),
+//     used verbatim.
 const CAPTAIN_OPTS = SERVER_URL
   ? { serverURL: SERVER_URL }
   : { serverIdx: SERVER_IDX };
-const AUTH_OPTS = SERVER_URL
-  ? { serverURL: SERVER_URL.replace(/\/v2\/captain\/?$/, "") }
-  : { serverIdx: SERVER_IDX };
+
+// Token endpoint selection. Since @gbg/go-core 0.1.x the token endpoint is
+// GBG's central auth service (`https://api.auth.gbgplc.com/as/token.oauth2`),
+// which is global: it is NOT per region and NOT hosted on the Captain host,
+// so it can no longer be derived from GO_SERVER_URL.
+//
+//   - No GO_AUTH_URL, no GO_SERVER_URL → prod: use the SDK's built-in default.
+//   - No GO_AUTH_URL, GO_SERVER_URL set → nonprod: default to the nonprod auth
+//     service, `https://test-api.auth.gbgplc.com`.
+//   - GO_AUTH_URL set → used verbatim (host only; the SDK appends the path).
+const NONPROD_AUTH_URL = "https://test-api.auth.gbgplc.com";
+const AUTH_OPTS = AUTH_URL
+  ? { serverURL: AUTH_URL }
+  : SERVER_URL
+    ? { serverURL: NONPROD_AUTH_URL }
+    : {};
+if (!AUTH_URL && SERVER_URL) {
+  console.warn(
+    `GO_SERVER_URL is set but GO_AUTH_URL is not; defaulting the token ` +
+      `endpoint to ${NONPROD_AUTH_URL}. Set GO_AUTH_URL to override.`
+  );
+}
 
 if (
   !SERVER_URL &&
@@ -123,13 +138,15 @@ async function authenticate() {
       `Auth response omitted expiresIn; assuming ${FALLBACK_TTL_MS / 1000}s lifetime`
     );
   }
-  // Report the actual target, not just the index — when GO_SERVER_URL is set
-  // it (not the region index) is what's really in effect.
+  // Report the actual targets. When GO_SERVER_URL is set it (not the region
+  // index) is what's really in effect for Captain, and the token endpoint is
+  // selected independently (see AUTH_OPTS).
   const target = SERVER_URL
     ? SERVER_URL
     : `${REGIONS[SERVER_IDX] ?? "?"} region (serverIdx ${SERVER_IDX})`;
+  const authTarget = AUTH_OPTS.serverURL ?? "SDK default auth server";
   console.log(
-    `Authenticated with GBG Go [${target}], ` +
+    `Authenticated with GBG Go [captain: ${target}; auth: ${authTarget}], ` +
       `token valid for ${Math.round(ttlMs / 1000)}s`
   );
 }
@@ -253,15 +270,22 @@ app.post("/api/journey/start", async (req, res) => {
       interactions = { error: err.message };
     }
 
-    // `interactions.fetch` returns a discriminated union — either a populated
-    // ResponseBody (`instanceId` / `interactionId` / `journey` / `interaction`)
-    // or a FetchInteractionError (`status` / `code` / `message`). It's not an
-    // array, so don't expect `.length`. Log a shape-aware summary instead.
+    // `interactions.fetch` returns a discriminated union: a populated
+    // ResponseBody (`instanceId` / `interactionId` / `journey` / `interaction`),
+    // a still-processing body (`instanceId` / `journey` / `processing: true`,
+    // meaning no interaction is available yet), or a FetchInteractionError
+    // (`status` / `code` / `message`). It's not an array, so don't expect
+    // `.length`. Log a shape-aware summary instead.
     if ("interactionId" in interactions) {
       console.log(
         "Interaction fetched:",
         interactions.interactionId,
         "for journey",
+        journey.instanceId
+      );
+    } else if (interactions.processing) {
+      console.log(
+        "Interaction not ready yet (journey still processing) for journey",
         journey.instanceId
       );
     } else {
