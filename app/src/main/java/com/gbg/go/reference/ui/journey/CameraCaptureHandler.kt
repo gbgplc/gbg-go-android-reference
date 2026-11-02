@@ -128,8 +128,9 @@ internal class CameraCaptureHandler(
   /**
    * Smart Capture selfie result: the preview photo plus the encrypted biometric
    * blob from the liveness check. The blob is forwarded base64-encoded under
-   * `encryptedBlob` so the journey can pass it to server-side validation —
-   * matching the iOS reference, whose selfie result carries the same blob.
+   * `encryptedImageBase64`, which is the key the hosted selfie card reads (the
+   * same key the SDK's own selfie slot uses). Any other key is silently
+   * ignored by the card and the liveness evidence is lost.
    */
   fun completeWithSmartCaptureSelfie(previewPhoto: Bitmap, encryptedBlob: ByteArray) {
     val responder = activeResponder ?: return
@@ -137,7 +138,7 @@ internal class CameraCaptureHandler(
       responder,
       previewPhoto,
       extraData = mapOf(
-        "encryptedBlob" to JsonPrimitive(Base64.encodeToString(encryptedBlob, Base64.NO_WRAP)),
+        "encryptedImageBase64" to JsonPrimitive(Base64.encodeToString(encryptedBlob, Base64.NO_WRAP)),
       ),
     )
   }

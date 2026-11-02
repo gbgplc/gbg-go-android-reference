@@ -16,6 +16,7 @@ package com.gbg.go.reference.ui.capture
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import com.gbg.gbgbridge.capabilities.NfcDetector
 
 object DeviceCapabilities {
 
@@ -26,6 +27,17 @@ object DeviceCapabilities {
    */
   fun supportsSmartCapture(context: Context): Boolean =
     hasCamera(context) && !isProbablyEmulator()
+
+  /**
+   * True when this device has an NFC reader and so can read a passport chip.
+   * Emulators have none. The bridge SDK cannot check this itself (it has no
+   * Context), so the app feeds the answer into `BridgeHost.nfcRead.deviceCanRead`;
+   * without it the SDK reports chip reading as unsupported everywhere.
+   */
+  fun supportsChipReading(context: Context): Boolean = NfcDetector.hasNfc(context)
+
+  /** True when NFC is switched on in system settings (hardware present or not). */
+  fun isNfcEnabled(context: Context): Boolean = NfcDetector.isNfcEnabled(context)
 
   private fun hasCamera(context: Context): Boolean =
     context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)

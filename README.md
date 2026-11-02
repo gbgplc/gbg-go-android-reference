@@ -6,8 +6,8 @@
 
 A complete, runnable reference integration of the GBG Go identity
 verification journey in an Android app using the **GBGBridge Android SDK**,
-**with the real Smart Capture SDKs** for document scanning and face capture
-with liveness detection.
+**with the real Smart Capture SDKs** for document scanning, face capture
+with liveness detection and passport chip reading over NFC.
 
 This project demonstrates:
 
@@ -17,8 +17,11 @@ This project demonstrates:
   guided document scanning with auto-crop and quality scoring
   (`com.gbg.smartcapture:documentcamera`), and face capture with liveness
   detection plus an encrypted biometric blob (`com.gbg.smartcapture:facecamera`)
+- **Passport chip reading over NFC** through the GBGBridge `nfcRead` slot,
+  using the Smart Capture Ozone reader (`com.gbg.smartcapture:ozoneui`)
 - A runtime fallback to the stub surface on emulators / no-camera devices, so
-  the journey still runs end-to-end without real hardware
+  the journey still runs end-to-end without real hardware; chip reading is
+  reported as unsupported wherever there is no NFC reader
 
 ## What changed from Part 1
 
@@ -29,10 +32,12 @@ SDKs is a small, localised change — the handler registration, the
 | File | Change |
 |------|--------|
 | `app/src/main/java/com/gbg/go/reference/ui/capture/SmartCaptureLauncher.kt` | New — maps the Smart Capture Activities onto `CameraCaptureHandler` |
-| `app/src/main/java/com/gbg/go/reference/ui/capture/DeviceCapabilities.kt` | New — decides Smart Capture vs stub fallback at runtime |
+| `app/src/main/java/com/gbg/go/reference/ui/capture/SmartCaptureChipReader.kt` | New — maps the Ozone chip reader onto the bridge's `NfcReadResult` |
+| `app/src/main/java/com/gbg/go/reference/ui/capture/DeviceCapabilities.kt` | New — decides Smart Capture vs stub fallback, and whether the device has an NFC reader |
 | `app/src/main/java/com/gbg/go/reference/ui/journey/CameraCaptureHandler.kt` | Modified — Smart Capture success paths (selfie forwards the encrypted blob) |
-| `app/src/main/java/com/gbg/go/reference/ui/journey/JourneyScreen.kt` | Modified — launches the SDK on real devices, falls back to the stub surface otherwise |
-| `app/build.gradle.kts` + `settings.gradle.kts` | Modified — Smart Capture dependencies + their S3 Maven repo |
+| `app/src/main/java/com/gbg/go/reference/ui/journey/JourneyScreen.kt` | Modified — launches the SDKs on real devices, falls back to the stub surface otherwise; wires the `nfcRead` slot |
+| `app/src/main/AndroidManifest.xml` | Modified — NFC permission and optional NFC hardware feature |
+| `app/build.gradle.kts` + `settings.gradle.kts` | Modified — Smart Capture dependencies (including Ozone) + their S3 Maven repo; `compileSdk` 36 |
 
 Everything else — the companion server, `JourneyService`, the bridge wiring,
 `CaptureStubScreen` — is identical to Part 1.
@@ -51,6 +56,8 @@ Everything else — the companion server, `JourneyService`, the bridge wiring,
   representative. Building this branch requires them (see
   [Enabling Smart Capture](#enabling-smart-capture)); the
   [Part 1 branch](../../tree/main) needs none of this.
+- **An Android phone with an NFC reader** for chip reading (emulators have
+  none, so they report chip reading as unsupported)
 
 ## Quick start
 
@@ -68,8 +75,8 @@ The reference app depends on `com.gbg:gbgbridge-sdk:1.1.0`, which is
 published to [Maven Central](https://central.sonatype.com/artifact/com.gbg/gbgbridge-sdk)
 and resolves automatically.
 
-This branch additionally depends on the Smart Capture SDKs
-(`com.gbg.smartcapture:{commons,documentcamera,facecamera}`), which are served
+This branch additionally depends on the Smart Capture SDKs, version 1.4.4
+(`com.gbg.smartcapture:{commons,documentcamera,facecamera,ozone,ozoneui}`), which are served
 from a credentialed S3 Maven repository — **the build will not resolve them
 until you add your Smart Capture credentials**. See
 [Enabling Smart Capture](#enabling-smart-capture) below.
@@ -108,7 +115,8 @@ on the same Wi-Fi, replace it with your machine's LAN IP.
 Capture behaviour depends on the hardware: on a **real device** the journey's
 document and selfie requests open the Smart Capture SDK screens; on an
 **emulator** (no usable camera) it automatically falls back to the stub
-capture surface.
+capture surface. A chip-read request opens the Ozone reader on a phone with
+NFC; without one, the journey is told chip reading is unsupported.
 
 ## Project structure
 
@@ -135,7 +143,8 @@ gbg-go-android-reference/
 │       │   ├── ui/capture/
 │       │   │   ├── CaptureStubScreen.kt    # Stub surface (emulator fallback)
 │       │   │   ├── SmartCaptureLauncher.kt # Smart Capture SDK ↔ handler glue
-│       │   │   └── DeviceCapabilities.kt   # Smart Capture vs stub decision
+│       │   │   ├── SmartCaptureChipReader.kt # Ozone chip reader ↔ nfcRead slot
+│       │   │   └── DeviceCapabilities.kt   # Smart Capture vs stub, NFC present
 │       │   └── ui/theme/Theme.kt
 │       └── res/
 │           ├── values/strings.xml
@@ -232,15 +241,45 @@ repository.
 ./gradlew :app:assembleDebug
 ```
 
-Smart Capture needs real camera hardware, so build and run on a **physical
-device**. On an emulator the app falls back to the stub capture surface even
-with credentials configured.
+Smart Capture needs real camera hardware, and chip reading needs an NFC
+reader, so build and run on a **physical device**. On an emulator the app
+falls back to the stub capture surface even with credentials configured, and
+reports chip reading as unsupported.
+
+### How chip reading works
+
+GBGBridge 1.1.0 adds a third typed slot, `BridgeHost.nfcRead`, alongside the
+camera handlers. It answers the `document.nfc` capability and the
+`document.nfc.read` action, and follows the same suspend-and-resume pattern
+as the SDK's capture slots. The app does two things:
+
+- Tells the SDK whether this device can read a chip:
+  `host.nfcRead.deviceCanRead = { NfcDetector.hasNfc(context) }`. The SDK
+  cannot check the hardware itself (it has no `Context`); without this it
+  reports chip reading as unsupported everywhere.
+- Runs the Ozone reader when a request arrives and hands back what it read.
+  The handler passes the request to `JourneyScreen`, which launches
+  `OzoneUiActivity` with the access key (document number, date of birth, date
+  of expiry) and returns `host.nfcRead.awaitCompletion()`. When the reader
+  finishes, `SmartCaptureChipReader` maps its result to an `NfcReadResult`
+  (every data group as an `NfcReadFile`, and the BAC, PACE, chip
+  authentication, active authentication and passive authentication outcomes
+  as `NfcAuthCheck`s) and the screen calls `host.nfcRead.complete(result)`.
+
+The SDK does the rest: it validates the request, answers busy and unsupported
+states, decides from the BAC / PACE results whether the chip actually opened,
+reads the MRZ out of DG1, and shapes the response the web journey's NFC card
+expects. `document.nfc` is not listed in the app's static capability map; the
+SDK adds it from the slot, with `supported` reflecting `deviceCanRead`.
+
+If NFC is switched off in system settings the app answers `NFC_DISABLED`
+without opening the reader. Closing the reader answers the read as cancelled.
 
 ## Without Smart Capture
 
 If you don't have Smart Capture access, build the [Part 1 reference](../../tree/main)
-on `main` instead — it behaves identically up to the capture surface and needs
-no extra credentials. (Checking out this branch without credentials fails at
+on `main` instead — it behaves identically up to the capture surface (and has
+no chip reading) and needs no extra credentials. (Checking out this branch without credentials fails at
 Gradle dependency resolution, before anything compiles.)
 
 ## Branch structure

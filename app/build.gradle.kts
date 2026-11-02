@@ -9,7 +9,9 @@ plugins {
 
 android {
   namespace = "com.gbg.go.reference"
-  compileSdk = 34
+  // PART 2: 36, not 34. Smart Capture 1.4.x pulls AndroidX libraries (activity,
+  // CameraX 1.5) that require compileSdk 36. targetSdk is unchanged.
+  compileSdk = 36
 
   defaultConfig {
     applicationId = "com.gbg.go.reference"
@@ -58,17 +60,24 @@ dependencies {
 
   // PART 2 — Smart Capture SDKs.
   //
-  // Real document scanning (guided capture, auto-crop, quality scoring) and
-  // face capture with liveness detection + encrypted biometric blobs. On real
-  // devices these replace the CameraX/stub capture surface; on emulators (no
-  // usable camera) the app falls back to CaptureStubScreen at runtime.
+  // Real document scanning (guided capture, auto-crop, quality scoring), face
+  // capture with liveness detection + encrypted biometric blobs, and passport
+  // chip reading over NFC (Ozone). On real devices these replace the
+  // CameraX/stub capture surface; on emulators (no usable camera) the app falls
+  // back to CaptureStubScreen at runtime, and chip reading is reported as
+  // unsupported wherever there is no NFC reader.
   //
   // Distributed from a credentialed S3 Maven repo — see settings.gradle.kts.
   // Building this branch requires Smart Capture access; the `main` branch
   // (Part 1) needs none of these.
-  implementation("com.gbg.smartcapture:commons:1.1.2")
-  implementation("com.gbg.smartcapture:documentcamera:1.1.2")
-  implementation("com.gbg.smartcapture:facecamera:1.1.2")
+  val smartCaptureVersion = "1.4.4"
+  implementation("com.gbg.smartcapture:commons:$smartCaptureVersion")
+  implementation("com.gbg.smartcapture:documentcamera:$smartCaptureVersion")
+  implementation("com.gbg.smartcapture:facecamera:$smartCaptureVersion")
+  // Chip reading: `ozone` reads the chip, `ozoneui` is the ready-made reader
+  // screen (OzoneUiActivity) this app launches. Both need `commons`.
+  implementation("com.gbg.smartcapture:ozone:$smartCaptureVersion")
+  implementation("com.gbg.smartcapture:ozoneui:$smartCaptureVersion")
 
   implementation("androidx.core:core-ktx:1.13.1")
   implementation("androidx.activity:activity-compose:1.9.2")
@@ -94,7 +103,9 @@ dependencies {
   // CameraX powers the live preview behind the framing guide in
   // CaptureStubScreen. The actual JPEG hand-off to the bridge still goes
   // through ImageCapture → Bitmap, so the bridge wiring is unchanged.
-  val cameraXVersion = "1.3.4"
+  // 1.5.3 matches the CameraX version Smart Capture 1.4.x depends on, so the
+  // stub path and the SDK path share one CameraX.
+  val cameraXVersion = "1.5.3"
   implementation("androidx.camera:camera-core:$cameraXVersion")
   implementation("androidx.camera:camera-camera2:$cameraXVersion")
   implementation("androidx.camera:camera-lifecycle:$cameraXVersion")

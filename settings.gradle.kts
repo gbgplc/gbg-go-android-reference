@@ -17,7 +17,7 @@ dependencyResolutionManagement {
     // PART 2 — Smart Capture SDKs.
     //
     // The com.gbg.smartcapture artifacts (commons, documentcamera,
-    // facecamera) are distributed from a credentialed S3 Maven repository,
+    // facecamera, ozone, ozoneui) are distributed from a credentialed S3 Maven repository,
     // not Maven Central. Building this branch therefore requires Smart
     // Capture access — obtain the access key / secret from your GBG account
     // representative and add them to your *user-global* Gradle properties

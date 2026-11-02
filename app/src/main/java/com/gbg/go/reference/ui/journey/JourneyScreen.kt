@@ -15,6 +15,12 @@
 // against the wire-level action ids `camera.document.capture` and
 // `camera.selfie.capture`.
 //
+// PART 2 adds passport chip reading through the SDK's typed `nfcRead` slot
+// (`document.nfc` / `document.nfc.read`). Unlike the camera handlers above,
+// the SDK owns that protocol: the app assigns a handler that runs the Ozone
+// reader and returns `nfcRead.awaitCompletion()`, and the reader's result is
+// fed back with `nfcRead.complete(...)`.
+//
 // Lifecycle:
 //   - BridgeHost is held in a `remember { }` tied to the JourneyScreen route.
 //   - DisposableEffect calls `host.detach()` on screen exit so the JS bridge
@@ -66,7 +72,11 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.gbg.go.reference.ui.capture.CaptureMode
 import com.gbg.go.reference.ui.capture.CaptureStubScreen
 import com.gbg.go.reference.ui.capture.DeviceCapabilities
+import com.gbg.go.reference.ui.capture.SmartCaptureChipReader
 import com.gbg.go.reference.ui.capture.SmartCaptureLauncher
+import com.gbg.gbgbridge.capabilities.NfcReadError
+import com.gbg.gbgbridge.capabilities.NfcReadRequest
+import com.gbg.gbgbridge.capabilities.NfcReadResult
 import com.gbg.gbgbridge.core.BridgeCapabilityInfo
 import com.gbg.gbgbridge.core.BridgeConfiguration
 import com.gbg.gbgbridge.core.BridgeHost
@@ -109,8 +119,14 @@ fun JourneyScreen(
   // The BridgeHost lives for the lifetime of this screen. Compose's
   // `remember` keeps it across recompositions but releases on navigation
   // away — DisposableEffect below detaches the WebView edge first.
+  // The application context, not the Activity: the controller outlives
+  // recompositions and must not pin the Activity.
+  val appContext = context.applicationContext
   val controller = remember(journeyUrl) {
-    BridgeController(hostVersion = HOST_VERSION)
+    BridgeController(
+      hostVersion = HOST_VERSION,
+      canReadChip = { DeviceCapabilities.supportsChipReading(appContext) },
+    )
   }
 
   // Drive recomposition when the host raises an error. lastError is mutated
@@ -155,6 +171,18 @@ fun JourneyScreen(
     SmartCaptureLauncher.handleSelfieResult(result, controller.selfieHandler)
   }
 
+  // PART 2 — passport chip reading. The request in flight, or null when idle.
+  // Set when the SDK's nfcRead slot calls our handler; cleared when the reader
+  // returns. The Ozone reader is a full-screen Activity like the cameras, so
+  // it is launched the same way. Its result resumes the slot via complete().
+  var activeChipRead by remember { mutableStateOf<NfcReadRequest?>(null) }
+  val launchChipReader = rememberLauncherForActivityResult(
+    ActivityResultContracts.StartActivityForResult(),
+  ) { result ->
+    activeChipRead = null
+    controller.host.nfcRead.complete(SmartCaptureChipReader.toResult(result))
+  }
+
   // Wire the handlers' "I need a UI" callbacks back to Compose state.
   // The terminal-event hook navigates forward; once it fires the host is torn
   // down by the route change, so guard against re-entry with a one-shot flag.
@@ -168,6 +196,7 @@ fun JourneyScreen(
     controller.selfieHandler.onDeactivate = {
       if (activeCapture == CaptureMode.Selfie) activeCapture = null
     }
+    controller.onChipReadRequested = { request -> activeChipRead = request }
     controller.delegate.onErrorBanner = { hostErrorBanner = it }
     controller.delegate.onTerminalEvent = { status, instanceId, interactionId ->
       if (!terminalFired) {
@@ -192,6 +221,22 @@ fun JourneyScreen(
         SmartCaptureLauncher.selfieIntent(context),
       )
       null -> Unit
+    }
+  }
+
+  // PART 2 — when a chip read becomes active, open the Ozone reader. A device
+  // with no NFC reader never gets here: the SDK answers UNSUPPORTED from
+  // `deviceCanRead` first. NFC switched off is different, and the SDK has a
+  // code for it, so answer that without opening the reader.
+  LaunchedEffect(activeChipRead) {
+    val request = activeChipRead ?: return@LaunchedEffect
+    if (!DeviceCapabilities.isNfcEnabled(context)) {
+      activeChipRead = null
+      controller.host.nfcRead.complete(
+        NfcReadResult.Failed(NfcReadError.NFC_DISABLED, "NFC is turned off in system settings"),
+      )
+    } else {
+      launchChipReader.launch(SmartCaptureChipReader.intent(context, request))
     }
   }
 
@@ -323,6 +368,7 @@ fun JourneyScreen(
         controller.documentHandler.cancelActive("Journey screen disposed")
         controller.selfieHandler.cancelActive("Journey screen disposed")
       } finally {
+        // detach() also cancels a chip read in flight (the SDK owns that slot).
         controller.host.detach()
       }
     }
@@ -340,17 +386,29 @@ fun JourneyScreen(
  * silently stop firing. Holding it as a property of a `remember`d
  * controller keeps it pinned until the screen leaves composition.
  */
-private class BridgeController(hostVersion: String) {
+private class BridgeController(
+  hostVersion: String,
+  /** Whether this device has an NFC reader. Read on every `capability.query`. */
+  canReadChip: () -> Boolean,
+) {
 
   val delegate = LoggingDelegate()
 
   val documentHandler = CameraCaptureHandler(action = "camera.document.capture")
   val selfieHandler = CameraCaptureHandler(action = "camera.selfie.capture")
 
-  // The static capability map advertised on `capability.query`. Both slots
-  // declare `supported = true` so the web journey knows it can request
+  /**
+   * PART 2 — set by JourneyScreen. Called on the main thread when the web
+   * journey requests a chip read; the screen opens the reader and later calls
+   * `host.nfcRead.complete(...)` with what it read.
+   */
+  var onChipReadRequested: ((NfcReadRequest) -> Unit)? = null
+
+  // The static capability map advertised on `capability.query`. Both camera
+  // slots declare `supported = true` so the web journey knows it can request
   // these actions; the actual native UI presentation happens inside the
-  // handlers above.
+  // handlers above. `document.nfc` is NOT listed here: the SDK adds it itself
+  // from the nfcRead slot below, with `supported` reflecting deviceCanRead.
   val host: BridgeHost = BridgeHost(
     configuration = BridgeConfiguration(
       hostVersion = hostVersion,
@@ -363,6 +421,23 @@ private class BridgeController(hostVersion: String) {
     host.delegate = delegate
     host.register(documentHandler)
     host.register(selfieHandler)
+
+    // PART 2 — chip reading through the SDK's typed slot. Assigning a handler
+    // enables the capability; deviceCanRead decides whether it is advertised as
+    // supported. The handler hands the request to the screen and suspends until
+    // the reader's result arrives via complete(). The SDK validates the request,
+    // answers BUSY while a read is running, and builds the wire response.
+    host.nfcRead.deviceCanRead = canReadChip
+    host.nfcRead.handler = { request ->
+      val requested = onChipReadRequested
+      if (requested == null) {
+        // No screen wired up yet. Not reachable once the journey is on screen.
+        NfcReadResult.Failed(NfcReadError.NFC_READ_FAILED, "No screen to read the chip from")
+      } else {
+        requested(request)
+        host.nfcRead.awaitCompletion()
+      }
+    }
   }
 }
 
