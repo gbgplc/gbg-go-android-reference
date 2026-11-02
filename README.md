@@ -27,7 +27,7 @@ This project demonstrates:
 
 ### 1. Add the GBGBridge SDK
 
-The reference app depends on `com.gbg:gbgbridge-sdk:0.1.0-alpha01`, which is
+The reference app depends on `com.gbg:gbgbridge-sdk:1.1.0`, which is
 published to [Maven Central](https://central.sonatype.com/artifact/com.gbg/gbgbridge-sdk).
 The build resolves it automatically — no extra setup required.
 
