@@ -27,7 +27,8 @@ Edit `.env` with your credentials:
 | `GO_PASSWORD` | API password |
 | `GO_SERVER_IDX` | Regional server: `0` = EU, `1` = US, `2` = AU |
 | `GO_RESOURCE_ID` | Default resource ID for journeys (overridable per-request) |
-| `GO_SERVER_URL` | Optional — GBG Go API base URL override |
+| `GO_SERVER_URL` | Optional. Captain API base URL override (nonprod / custom host) |
+| `GO_AUTH_URL` | Optional. Token endpoint host override. Defaults to the prod auth service, or to the nonprod one when `GO_SERVER_URL` is set |
 | `PORT` | Server port (default: `3000`) |
 
 ## Running
